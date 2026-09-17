@@ -191,14 +191,14 @@ function Initialize-SessionAuth {
 
     # 데이터 파일이 없거나 레거시 마이그레이션이 필요한 경우
     if ((-not (Test-Path $DataFile)) -or $needsMigration) {
-        Show-Banner -Title "AES-256 보안 자산 관리자 초기 설정" -Color "Yellow"
+        Show-Banner -Title "AssetManager 초기 설정" -Color "Yellow"
         if ($needsMigration) {
             Write-Host " [*] 기존 자산 데이터($($migratedAssets.Count)건)를 감지했습니다." -ForegroundColor Green
-            Write-Host " [*] 데이터를 보호할 새로운 '마스터 비밀번호'를 설정하시면 AES-256으로 자동 변환됩니다." -ForegroundColor Yellow
+            Write-Host " [*] 데이터를 보호할 '마스터 비밀번호'를 설정해주세요." -ForegroundColor Yellow
         } else {
-            Write-Host " [!] 최초 실행입니다. 자산 데이터를 암호화할 '마스터 비밀번호'를 설정하세요." -ForegroundColor Yellow
+            Write-Host " [!] 최초 실행입니다. 사용할 '마스터 비밀번호'를 설정하세요." -ForegroundColor Yellow
         }
-        Write-Host " [★] 중요: 비밀번호를 분실하면 어떤 방법으로도 데이터를 절대 복구할 수 없습니다!`n" -ForegroundColor Red
+        Write-Host " [★] 중요: 비밀번호를 분실하면 어떤 방법으로도 데이터를 복구할 수 없습니다!`n" -ForegroundColor Red
         
         while ($true) {
             $pwd1 = Read-MaskedInput -PromptText " ▶ 마스터 비밀번호 설정 (최소 6자리)"
@@ -219,7 +219,7 @@ function Initialize-SessionAuth {
             
             $Global:SessionPassword = $pwd1
             Save-Assets -Assets $migratedAssets
-            Write-Host "`n [v] AES-256 보안 저장소가 안전하게 설정되었습니다!" -ForegroundColor Green
+            Write-Host "`n [v] 보안 저장소가 안전하게 설정되었습니다!" -ForegroundColor Green
             Start-Sleep -Seconds 1
             break
         }
@@ -233,8 +233,8 @@ function Initialize-SessionAuth {
 
     while ($attempts -lt $maxAttempts) {
         Clear-Host
-        Show-Banner -Title "AES-256 MASTER AUTHENTICATION" -Color "Cyan"
-        Write-Host " 🔐 자산 데이터를 복호화하려면 마스터 비밀번호를 입력하세요.`n" -ForegroundColor White
+        Show-Banner -Title "AssetManager 로그인" -Color "Cyan"
+        Write-Host " 🔐 자산 관리자에 접속하려면 마스터 비밀번호를 입력하세요.`n" -ForegroundColor White
         
         $inputPwd = Read-MaskedInput -PromptText " ▶ 마스터 비밀번호"
         
@@ -248,13 +248,13 @@ function Initialize-SessionAuth {
             # 실제 복호화 시도로 비밀번호 검증
             $null = Decrypt-Aes256 -EncryptedBase64 $encryptedContent -Password $inputPwd
             $Global:SessionPassword = $inputPwd
-            Write-Host "`n [v] 복호화 인증 성공! 안전하게 자산 관리자를 로드합니다." -ForegroundColor Green
+            Write-Host "`n [v] 인증 성공! 자산 관리자를 시작합니다." -ForegroundColor Green
             Start-Sleep -Milliseconds 600
             return
         } catch {
             $attempts++
             $remain = $maxAttempts - $attempts
-            Write-Host "`n [!] 비밀번호가 일치하지 않거나 복호화에 실패했습니다. (남은 횟수: $remain 회)" -ForegroundColor Red
+            Write-Host "`n [!] 비밀번호가 일치하지 않습니다. (남은 횟수: $remain 회)" -ForegroundColor Red
             Start-Sleep -Seconds 1
         }
     }
@@ -431,7 +431,7 @@ Initialize-SessionAuth
 # 14. 메인 메뉴 루프
 while ($true) {
     Clear-Host
-    Show-Banner -Title "SECURE ASSET MANAGER (AES-256)" -Color "Cyan"
+    Show-Banner -Title "AssetManager" -Color "Cyan"
     
     Write-Host "   [1] 자산 검색                 [2] 자산 조회 (전체)" -ForegroundColor White
     Write-Host "   [3] 자산 추가                 [4] 자산 수정" -ForegroundColor White
