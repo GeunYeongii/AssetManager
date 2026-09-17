@@ -465,19 +465,19 @@ function Change-MasterPasswordFlow {
     }
 }
 
-# 14. 전체/검색 자산 요약 목록 출력 함수 (동적 컬럼 너비 계산 적용)
+# 14. 전체/검색 자산 요약 목록 출력 함수 (동적 컬럼 너비 및 완벽 수직 정렬)
 function Show-AssetSummaryTable {
     param([array]$AssetList)
 
     if ($AssetList.Count -eq 0) { return }
 
-    # 각 컬럼의 최소 보장 너비
-    $wNo   = 6   # "번호"
-    $wName = 8   # "자산명"
-    $wIP   = 8   # "IP주소"
-    $wAccs = 16  # "등록 계정 요약"
-    $wURL  = 10  # "접속URL"
-    $wNote = 6   # "비고"
+    # 헤더 텍스트 기본 너비
+    $wNo   = Get-DisplayWidth "번호"
+    $wName = Get-DisplayWidth "자산명"
+    $wIP   = Get-DisplayWidth "IP주소"
+    $wAccs = Get-DisplayWidth "등록 계정 요약"
+    $wURL  = Get-DisplayWidth "접속URL"
+    $wNote = Get-DisplayWidth "비고"
 
     $rows = @()
 
@@ -514,16 +514,19 @@ function Show-AssetSummaryTable {
         }
         $rows += $rowItem
 
-        # 최대 너비 계산 (데이터 너비 + 2 여백)
-        $wNo   = [Math]::Max($wNo, (Get-DisplayWidth $noStr) + 2)
-        $wName = [Math]::Max($wName, (Get-DisplayWidth $a.AssetName) + 2)
-        $wIP   = [Math]::Max($wIP, (Get-DisplayWidth $a.IP) + 2)
-        $wAccs = [Math]::Max($wAccs, (Get-DisplayWidth $accSummary) + 2)
-        $wURL  = [Math]::Max($wURL, (Get-DisplayWidth $urlStr) + 2)
-        $wNote = [Math]::Max($wNote, (Get-DisplayWidth $noteStr) + 2)
+        # 최대 너비 계산
+        $wNo   = [Math]::Max($wNo, (Get-DisplayWidth $noStr))
+        $wName = [Math]::Max($wName, (Get-DisplayWidth $a.AssetName))
+        $wIP   = [Math]::Max($wIP, (Get-DisplayWidth $a.IP))
+        $wAccs = [Math]::Max($wAccs, (Get-DisplayWidth $accSummary))
+        $wURL  = [Math]::Max($wURL, (Get-DisplayWidth $urlStr))
+        $wNote = [Math]::Max($wNote, (Get-DisplayWidth $noteStr))
     }
 
-    # 헤더 및 동적 구분선 생성
+    # 열 간격 (Column Gap: 3칸)
+    $gap = "   "
+
+    # 헤더 및 구분선 생성
     $hNo   = Pad-RightDisplay "번호" $wNo
     $hName = Pad-RightDisplay "자산명" $wName
     $hIP   = Pad-RightDisplay "IP주소" $wIP
@@ -531,15 +534,16 @@ function Show-AssetSummaryTable {
     $hURL  = Pad-RightDisplay "접속URL" $wURL
     $hNote = Pad-RightDisplay "비고" $wNote
 
-    $sepNo   = "─" * ($wNo - 1)
-    $sepName = "─" * ($wName - 1)
-    $sepIP   = "─" * ($wIP - 1)
-    $sepAccs = "─" * ($wAccs - 1)
-    $sepURL  = "─" * ($wURL - 1)
-    $sepNote = "─" * ($wNote - 1)
+    $sepNo   = "─" * $wNo
+    $sepName = "─" * $wName
+    $sepIP   = "─" * $wIP
+    $sepAccs = "─" * $wAccs
+    $sepURL  = "─" * $wURL
+    $sepNote = "─" * $wNote
 
-    Write-Host " $hNo $hName $hIP $hAccs $hURL $hNote" -ForegroundColor DarkGray
-    Write-Host " $sepNo $sepName $sepIP $sepAccs $sepURL $sepNote" -ForegroundColor DarkGray
+    # 헤더 및 구분선 출력
+    Write-Host (" " + $hNo + $gap + $hName + $gap + $hIP + $gap + $hAccs + $gap + $hURL + $gap + $hNote) -ForegroundColor DarkGray
+    Write-Host (" " + $sepNo + $gap + $sepName + $gap + $sepIP + $gap + $sepAccs + $gap + $sepURL + $gap + $sepNote) -ForegroundColor DarkGray
 
     # 데이터 행 출력
     foreach ($r in $rows) {
@@ -550,11 +554,11 @@ function Show-AssetSummaryTable {
         $cURL  = Pad-RightDisplay $r.URLStr $wURL
         $cNote = Pad-RightDisplay $r.NoteStr $wNote
 
-        Write-Host " $cNo $cName $cIP $cAccs $cURL $cNote" -ForegroundColor White
+        Write-Host (" " + $cNo + $gap + $cName + $gap + $cIP + $gap + $cAccs + $gap + $cURL + $gap + $cNote) -ForegroundColor White
     }
 }
 
-# 15. 계정 목록 테이블 동적 너비 출력 공통 헬퍼
+# 15. 계정 목록 테이블 동적 너비 및 완벽 수직 정렬 출력 공통 헬퍼
 function Show-AccountListTable {
     param([array]$Accounts)
 
@@ -563,12 +567,12 @@ function Show-AccountListTable {
         return
     }
 
-    $wNo   = 6   # "번호"
-    $wAcc  = 10  # "접근유형"
-    $wType = 12  # "구분/역할"
-    $wID   = 12  # "계정 ID"
-    $wPW   = 14  # "패스워드"
-    $wDesc = 14  # "계정 설명/메모"
+    $wNo   = Get-DisplayWidth "번호"
+    $wAcc  = Get-DisplayWidth "접근유형"
+    $wType = Get-DisplayWidth "구분/역할"
+    $wID   = Get-DisplayWidth "계정 ID"
+    $wPW   = Get-DisplayWidth "패스워드"
+    $wDesc = Get-DisplayWidth "계정 설명/메모"
 
     $rows = @()
     for ($i = 0; $i -lt $Accounts.Count; $i++) {
@@ -588,13 +592,15 @@ function Show-AccountListTable {
             DescStr = $descStr
         }
 
-        $wNo   = [Math]::Max($wNo, (Get-DisplayWidth $noStr) + 2)
-        $wAcc  = [Math]::Max($wAcc, (Get-DisplayWidth $accTypeStr) + 2)
-        $wType = [Math]::Max($wType, (Get-DisplayWidth $roleStr) + 2)
-        $wID   = [Math]::Max($wID, (Get-DisplayWidth $acc.ID) + 2)
-        $wPW   = [Math]::Max($wPW, (Get-DisplayWidth $pwStr) + 2)
-        $wDesc = [Math]::Max($wDesc, (Get-DisplayWidth $descStr) + 2)
+        $wNo   = [Math]::Max($wNo, (Get-DisplayWidth $noStr))
+        $wAcc  = [Math]::Max($wAcc, (Get-DisplayWidth $accTypeStr))
+        $wType = [Math]::Max($wType, (Get-DisplayWidth $roleStr))
+        $wID   = [Math]::Max($wID, (Get-DisplayWidth $acc.ID))
+        $wPW   = [Math]::Max($wPW, (Get-DisplayWidth $pwStr))
+        $wDesc = [Math]::Max($wDesc, (Get-DisplayWidth $descStr))
     }
+
+    $gap = "   "
 
     $hNo   = Pad-RightDisplay "번호" $wNo
     $hAcc  = Pad-RightDisplay "접근유형" $wAcc
@@ -603,15 +609,15 @@ function Show-AccountListTable {
     $hPW   = Pad-RightDisplay "패스워드" $wPW
     $hDesc = Pad-RightDisplay "계정 설명/메모" $wDesc
 
-    $sepNo   = "─" * ($wNo - 1)
-    $sepAcc  = "─" * ($wAcc - 1)
-    $sepType = "─" * ($wType - 1)
-    $sepID   = "─" * ($wID - 1)
-    $sepPW   = "─" * ($wPW - 1)
-    $sepDesc = "─" * ($wDesc - 1)
+    $sepNo   = "─" * $wNo
+    $sepAcc  = "─" * $wAcc
+    $sepType = "─" * $wType
+    $sepID   = "─" * $wID
+    $sepPW   = "─" * $wPW
+    $sepDesc = "─" * $wDesc
 
-    Write-Host "  $hNo $hAcc $hType $hID $hPW $hDesc" -ForegroundColor DarkGray
-    Write-Host "  $sepNo $sepAcc $sepType $sepID $sepPW $sepDesc" -ForegroundColor DarkGray
+    Write-Host ("  " + $hNo + $gap + $hAcc + $gap + $hType + $gap + $hID + $gap + $hPW + $gap + $hDesc) -ForegroundColor DarkGray
+    Write-Host ("  " + $sepNo + $gap + $sepAcc + $gap + $sepType + $gap + $sepID + $gap + $sepPW + $gap + $sepDesc) -ForegroundColor DarkGray
 
     foreach ($r in $rows) {
         $cNo   = Pad-RightDisplay $r.NoStr $wNo
@@ -621,7 +627,7 @@ function Show-AccountListTable {
         $cPW   = Pad-RightDisplay $r.PWStr $wPW
         $cDesc = Pad-RightDisplay $r.DescStr $wDesc
 
-        Write-Host "  $cNo $cAcc $cType $cID $cPW $cDesc" -ForegroundColor White
+        Write-Host ("  " + $cNo + $gap + $cAcc + $gap + $cType + $gap + $cID + $gap + $cPW + $gap + $cDesc) -ForegroundColor White
     }
 }
 
