@@ -40,7 +40,7 @@ function Encrypt-Aes256 {
     [System.Buffer]::BlockCopy($magic, 0, $result, 0, $magic.Length)
     [System.Buffer]::BlockCopy($salt, 0, $result, $magic.Length, $salt.Length)
     [System.Buffer]::BlockCopy($iv, 0, $result, $magic.Length + $salt.Length, $iv.Length)
-    [System.Buffer]::BlockCopy($cipherBytes, 0, $result, $magic.Length + $salt.Length + $iv.Length, $cipherBytes.Length)
+    [System.Buffer]::BlockCopy($cipherBytes, 0, $result, $magic.Length + $salt.Length, $iv.Length)
 
     return [System.Convert]::ToBase64String($result)
 }
@@ -190,7 +190,7 @@ function Save-Assets {
     [System.IO.File]::WriteAllText($DataFile, $EncryptedText, [System.Text.UTF8Encoding]::new($false))
 }
 
-# 7. 계정 중복 검사 함수 (root 및 동일 ID 중복 방지)
+# 7. 계정 중복 검사 함수 (동일 ID 중복 방지)
 function Test-AccountExists {
     param(
         [array]$Accounts,
@@ -206,7 +206,19 @@ function Test-AccountExists {
     return $false
 }
 
-# 8. 한글 및 영문 너비 계산용 유틸리티
+# 8. root 계정 보유 여부 검사 함수
+function Test-HasRootAccount {
+    param([array]$Accounts)
+    if (-not $Accounts -or $Accounts.Count -eq 0) { return $false }
+    foreach ($acc in $Accounts) {
+        if ($acc.ID.Trim().ToLower() -eq "root" -or $acc.AccountType.Trim().ToLower() -eq "root") {
+            return $true
+        }
+    }
+    return $false
+}
+
+# 9. 한글 및 영문 너비 계산용 유틸리티
 function Get-DisplayWidth {
     param([string]$str)
     if ($null -eq $str) { return 0 }
@@ -238,7 +250,7 @@ function Pad-RightDisplay {
     return $str
 }
 
-# 9. UI 공통 배너
+# 10. UI 공통 배너
 function Show-Banner {
     param([string]$Title, [string]$Color = "Cyan")
     Write-Host " ╔═════════════════════════════════════════════════════════════╗" -ForegroundColor $Color
@@ -250,7 +262,7 @@ function Show-Banner {
     Write-Host " ╚═════════════════════════════════════════════════════════════╝`n" -ForegroundColor $Color
 }
 
-# 10. 사용자 입력 처리
+# 11. 사용자 입력 처리
 function Read-Input {
     param(
         [string]$PromptText,
@@ -270,7 +282,7 @@ function Read-Input {
     return $val
 }
 
-# 11. 프로그램 시작: 마스터 비밀번호 인증 및 세션 활성화
+# 12. 프로그램 시작: 마스터 비밀번호 인증 및 세션 활성화
 function Initialize-SessionAuth {
     Clear-Host
 
@@ -378,7 +390,7 @@ function Initialize-SessionAuth {
     exit
 }
 
-# 12. 마스터 비밀번호 변경
+# 13. 마스터 비밀번호 변경
 function Change-MasterPasswordFlow {
     try {
         Clear-Host
@@ -418,7 +430,7 @@ function Change-MasterPasswordFlow {
     }
 }
 
-# 13. 전체/검색 자산 요약 목록 출력 함수
+# 14. 전체/검색 자산 요약 목록 출력 함수
 function Show-AssetSummaryTable {
     param([array]$AssetList)
 
@@ -459,7 +471,7 @@ function Show-AssetSummaryTable {
     }
 }
 
-# 14. 자산 검색 (다중 계정 ID/타입/설명까지 검색)
+# 15. 자산 검색 (다중 계정 ID/타입/설명까지 검색)
 function Search-Assets {
     param([array]$AllAssets, [string]$Keyword)
     $isIPLike = $Keyword -match '^[\d\.\:]+$'
@@ -486,7 +498,7 @@ function Search-Assets {
     return @($results)
 }
 
-# 15. 단일 계정 정보 입력 헬퍼 (중복 검사 포함)
+# 16. 단일 계정 정보 입력 헬퍼 (root 자동 판별 및 중복 방지)
 function Read-NewAccountInput {
     param(
         [array]$ExistingAccounts,
@@ -494,31 +506,45 @@ function Read-NewAccountInput {
     )
     Write-Host "`n [ $HeaderMessage ] ('q' 입력 시 취소)" -ForegroundColor Cyan
     
+    $hasRoot = Test-HasRootAccount -Accounts $ExistingAccounts
+
     # 계정 ID 입력 및 중복 체크 루프
     $accID = ""
     while ($true) {
-        $accID = Read-Input " ▶ 계정 ID (예: root, admin, devuser 등)"
+        $accID = Read-Input " ▶ 계정 ID"
+        
+        if ($accID.ToLower() -eq "root" -and $hasRoot) {
+            Write-Host " [!] 이미 root 계정이 등록되어 있어 root는 추가할 수 없습니다.`n" -ForegroundColor Red
+            continue
+        }
         
         if (Test-AccountExists -Accounts $ExistingAccounts -CheckID $accID) {
-            if ($accID.ToLower() -eq "root") {
-                Write-Host " [!] 이미 'root' 계정이 등록되어 있어 다시 추가할 수 없습니다.`n" -ForegroundColor Red
-            } else {
-                Write-Host " [!] 이미 '$accID' 계정이 등록되어 있습니다. 다른 ID를 입력하세요.`n" -ForegroundColor Red
-            }
+            Write-Host " [!] 이미 '$accID' 계정이 등록되어 있습니다. 다른 ID를 입력하세요.`n" -ForegroundColor Red
             continue
         }
         break
     }
 
-    # 계정 구분/역할 기본값 제안 (ID가 root면 기본 role을 root로)
-    $defaultRolePrompt = if ($accID.ToLower() -eq "root") { " ▶ 계정 구분/역할 [root]" } else { " ▶ 계정 구분/역할 (예: root, admin, webuser, dev 등)" }
-    $accType = Read-Input $defaultRolePrompt -AllowEmpty ($accID.ToLower() -eq "root")
-    if ([string]::IsNullOrWhiteSpace($accType) -and $accID.ToLower() -eq "root") {
+    # 계정 구분/역할(Role) 결정
+    $accType = ""
+    if ($accID.ToLower() -eq "root") {
         $accType = "root"
+    } elseif ($hasRoot) {
+        # 이미 root가 있는 경우 자동으로 '일반' 배정 (입력 생략)
+        $accType = "일반"
+        Write-Host " [*] 이미 root 계정이 존재하여 계정 역할이 자동으로 '일반'으로 지정됩니다." -ForegroundColor DarkGray
+    } else {
+        # root가 아직 없는 경우에만 역할을 물어봄
+        $inType = Read-Input " ▶ 계정 구분/역할" -AllowEmpty $true
+        if ([string]::IsNullOrWhiteSpace($inType)) {
+            $accType = "일반"
+        } else {
+            $accType = $inType
+        }
     }
 
     $accPW   = Read-Input " ▶ 패스워드"
-    $accDesc = Read-Input " ▶ 계정 설명/메모 (선택, 없을 시 Enter)" -AllowEmpty $true
+    $accDesc = Read-Input " ▶ 계정 설명/메모" -AllowEmpty $true
 
     return [PSCustomObject]@{
         AccountID   = [guid]::NewGuid().ToString()
@@ -529,7 +555,7 @@ function Read-NewAccountInput {
     }
 }
 
-# 16. 자산 상세 정보 및 하위 계정 관리 화면
+# 17. 자산 상세 정보 및 하위 계정 관리 화면
 function Show-AssetDetailManage {
     param([string]$AssetID)
 
@@ -640,7 +666,6 @@ function Show-AssetDetailManage {
                     
                     $uID = Read-Input " ▶ 계정 ID [$($targetAcc.ID)]" -IsEditMode $true
                     if ($uID -and $uID.ToLower() -ne $targetAcc.ID.ToLower()) {
-                        # ID 변경 시 중복 검사
                         $otherAccounts = @($targetAsset.Accounts | Where-Object { $_.AccountID -ne $targetAcc.AccountID })
                         if (Test-AccountExists -Accounts $otherAccounts -CheckID $uID) {
                             Write-Host "`n [!] 이미 '$uID' 계정이 등록되어 있어 해당 ID로 변경할 수 없습니다." -ForegroundColor Red
@@ -649,9 +674,9 @@ function Show-AssetDetailManage {
                         }
                     }
 
-                    $uType = Read-Input " ▶ 계정 구분 [$($targetAcc.AccountType)]" -IsEditMode $true
+                    $uType = Read-Input " ▶ 계정 구분/역할 [$($targetAcc.AccountType)]" -IsEditMode $true
                     $uPW   = Read-Input " ▶ 패스워드 [********]" -IsEditMode $true
-                    $uDesc = Read-Input " ▶ 계정 설명 [$($targetAcc.Description)]" -IsEditMode $true
+                    $uDesc = Read-Input " ▶ 계정 설명/메모 [$($targetAcc.Description)]" -IsEditMode $true
 
                     for ($i = 0; $i -lt $allAssets.Count; $i++) {
                         if ($allAssets[$i].AssetID -eq $AssetID) {
@@ -731,11 +756,11 @@ function Show-AssetDetailManage {
 }
 
 # ─────────────────────────────────────────────────────────────
-# 17. 메인 프로그램 시작: 세션 인증
+# 18. 메인 프로그램 시작: 세션 인증
 # ─────────────────────────────────────────────────────────────
 Initialize-SessionAuth
 
-# 18. 메인 메뉴 루프
+# 19. 메인 메뉴 루프
 while ($true) {
     Clear-Host
     Show-Banner -Title "AssetManager" -Color "Cyan"
@@ -880,7 +905,6 @@ while ($true) {
                     # 계정 추가 루프
                     $addedCount = 0
                     while ($true) {
-                        # 현재 최신 자산의 계정 목록 가져오기
                         $targetForAcc = $assets | Where-Object { $_.AssetID -eq $existingAsset.AssetID }
                         $newAcc = Read-NewAccountInput -ExistingAccounts $targetForAcc.Accounts -HeaderMessage "추가할 계정 정보 입력"
                         
@@ -904,9 +928,9 @@ while ($true) {
                     $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
                 } else {
                     # ── CASE B: 신규 IP인 경우 ──
-                    $inputName = Read-Input " ▶ 2. 자산 이름 (예: 운영 DB서버, 웹서버01 등)"
-                    $inputURL  = Read-Input " ▶ 3. 접속 URL (포트 포함, 없을 시 Enter)" -AllowEmpty $true
-                    $inputNote = Read-Input " ▶ 4. 비고 / 메모 (없을 시 Enter)" -AllowEmpty $true
+                    $inputName = Read-Input " ▶ 2. 자산 이름"
+                    $inputURL  = Read-Input " ▶ 3. 접속 URL (없을 시 Enter)" -AllowEmpty $true
+                    $inputNote = Read-Input " ▶ 4. 비고/메모 (없을 시 Enter)" -AllowEmpty $true
 
                     # 첫 번째 계정 등록
                     $newAccounts = @()
@@ -995,7 +1019,7 @@ while ($true) {
                 $newURL = Read-Input " ▶ 3. 접속 URL [$($assets[$origIdx].WebURL)]" -IsEditMode $true
                 if ($newURL) { $assets[$origIdx].WebURL = $newURL }
 
-                $newNote = Read-Input " ▶ 4. 비고 [$($assets[$origIdx].Note)]" -IsEditMode $true
+                $newNote = Read-Input " ▶ 4. 비고/메모 [$($assets[$origIdx].Note)]" -IsEditMode $true
                 if ($newNote) { $assets[$origIdx].Note = $newNote }
 
                 Save-Assets -Assets $assets
