@@ -663,6 +663,154 @@ function Show-AssetSummaryTable {
     }
 }
 
+# 15. 전체/검색 자산 목록 대화형 테이블 선택 함수 (위/아래 방향키 및 번호 선택 지원)
+function Select-AssetFromTable {
+    param([array]$AssetList)
+
+    if (-not $AssetList -or $AssetList.Count -eq 0) { return $null }
+
+    # 헤더 텍스트 기본 너비
+    $wNo   = Get-DisplayWidth "번호"
+    $wName = Get-DisplayWidth "자산명"
+    $wIP   = Get-DisplayWidth "IP주소"
+    $wAccs = Get-DisplayWidth "등록 계정 요약"
+    $wURL  = Get-DisplayWidth "접속URL"
+    $wNote = Get-DisplayWidth "비고"
+
+    $rows = @()
+
+    for ($i = 0; $i -lt $AssetList.Count; $i++) {
+        $a = $AssetList[$i]
+        $noStr = ($i + 1).ToString()
+
+        $cliAccs = @($a.Accounts | Where-Object { $_.AccessType -eq "CLI" })
+        $guiAccs = @($a.Accounts | Where-Object { $_.AccessType -eq "GUI" })
+
+        $summaryParts = @()
+        if ($cliAccs.Count -gt 0) {
+            $first = $cliAccs[0].ID
+            $cliStr = if ($cliAccs.Count -eq 1) { "CLI:$first" } else { "CLI:$first 외 $($cliAccs.Count - 1)" }
+            $summaryParts += $cliStr
+        }
+        if ($guiAccs.Count -gt 0) {
+            $first = $guiAccs[0].ID
+            $guiStr = if ($guiAccs.Count -eq 1) { "GUI:$first" } else { "GUI:$first 외 $($guiAccs.Count - 1)" }
+            $summaryParts += $guiStr
+        }
+
+        $accSummary = if ($summaryParts.Count -gt 0) { $summaryParts -join " | " } else { "계정 없음" }
+        $urlStr = if ($a.WebURL) { $a.WebURL } else { "-" }
+        $noteStr = if ($a.Note) { $a.Note } else { "-" }
+
+        $rowItem = [PSCustomObject]@{
+            NoStr      = $noStr
+            NameStr    = $a.AssetName
+            IPStr      = $a.IP
+            AccSummary = $accSummary
+            URLStr     = $urlStr
+            NoteStr    = $noteStr
+        }
+        $rows += $rowItem
+
+        # 최대 너비 계산
+        $wNo   = [Math]::Max($wNo, (Get-DisplayWidth $noStr))
+        $wName = [Math]::Max($wName, (Get-DisplayWidth $a.AssetName))
+        $wIP   = [Math]::Max($wIP, (Get-DisplayWidth $a.IP))
+        $wAccs = [Math]::Max($wAccs, (Get-DisplayWidth $accSummary))
+        $wURL  = [Math]::Max($wURL, (Get-DisplayWidth $urlStr))
+        $wNote = [Math]::Max($wNote, (Get-DisplayWidth $noteStr))
+    }
+
+    $gap = "   "
+
+    $hNo   = Pad-RightDisplay "번호" $wNo
+    $hName = Pad-RightDisplay "자산명" $wName
+    $hIP   = Pad-RightDisplay "IP주소" $wIP
+    $hAccs = Pad-RightDisplay "등록 계정 요약" $wAccs
+    $hURL  = Pad-RightDisplay "접속URL" $wURL
+    $hNote = Pad-RightDisplay "비고" $wNote
+
+    $sepNo   = "─" * $wNo
+    $sepName = "─" * $wName
+    $sepIP   = "─" * $wIP
+    $sepAccs = "─" * $wAccs
+    $sepURL  = "─" * $wURL
+    $sepNote = "─" * $wNote
+
+    Write-Host ("   " + $hNo + $gap + $hName + $gap + $hIP + $gap + $hAccs + $gap + $hURL + $gap + $hNote) -ForegroundColor DarkGray
+    Write-Host ("   " + $sepNo + $gap + $sepName + $gap + $sepIP + $gap + $sepAccs + $gap + $sepURL + $gap + $sepNote) -ForegroundColor DarkGray
+
+    $selectedIndex = 0
+    $count = $rows.Count
+    $startTop = [Console]::CursorTop
+
+    try { [Console]::CursorVisible = $false } catch {}
+
+    while ($true) {
+        try { [Console]::SetCursorPosition(0, $startTop) } catch {}
+
+        for ($i = 0; $i -lt $count; $i++) {
+            $r = $rows[$i]
+            $isSel = ($i -eq $selectedIndex)
+
+            $prefix = if ($isSel) { " ▶ " } else { "   " }
+            $fg = if ($isSel) { "Cyan" } else { "White" }
+
+            $cNo   = Pad-RightDisplay $r.NoStr $wNo
+            $cName = Pad-RightDisplay $r.NameStr $wName
+            $cIP   = Pad-RightDisplay $r.IPStr $wIP
+            $cAccs = Pad-RightDisplay $r.AccSummary $wAccs
+            $cURL  = Pad-RightDisplay $r.URLStr $wURL
+            $cNote = Pad-RightDisplay $r.NoteStr $wNote
+
+            Write-Host ($prefix + $cNo + $gap + $cName + $gap + $cIP + $gap + $cAccs + $gap + $cURL + $gap + $cNote) -ForegroundColor $fg
+        }
+
+        Write-Host "`n ───────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
+        Write-Host "   [0] 메인 메뉴로 돌아가기" -ForegroundColor DarkGray
+
+        $keyInfo = [Console]::ReadKey($true)
+
+        switch ($keyInfo.Key) {
+            'UpArrow' {
+                if ($selectedIndex -gt 0) {
+                    $selectedIndex--
+                } else {
+                    $selectedIndex = $count - 1
+                }
+            }
+            'DownArrow' {
+                if ($selectedIndex + 1 -lt $count) {
+                    $selectedIndex++
+                } else {
+                    $selectedIndex = 0
+                }
+            }
+            'Enter' {
+                try { [Console]::CursorVisible = $true } catch {}
+                return $AssetList[$selectedIndex]
+            }
+            'Escape' {
+                try { [Console]::CursorVisible = $true } catch {}
+                return $null
+            }
+            default {
+                $ch = $keyInfo.KeyChar
+                if ($ch -eq '0' -or $ch -eq 'q' -or $ch -eq 'Q' -or $ch -eq 'ㅂ') {
+                    try { [Console]::CursorVisible = $true } catch {}
+                    return $null
+                }
+                if ($ch -ge '1' -and $ch -le '9') {
+                    $digit = [int]$ch - 48
+                    if ($digit -ge 1 -and $digit -le $count) {
+                        $selectedIndex = $digit - 1
+                    }
+                }
+            }
+        }
+    }
+}
+
 # 15. 계정 목록 테이블 동적 너비 및 완벽 수직 정렬 출력 공통 헬퍼
 function Show-AccountListTable {
     param([array]$Accounts)
@@ -1132,17 +1280,9 @@ while ($true) {
                     $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
                 } else {
                     Write-Host "`n [ 검색 결과 (총 $($results.Count)건) ]" -ForegroundColor Green
-                    Show-AssetSummaryTable -AssetList $results
-                    Write-Host "`n [*] 상세 조회 및 계정 관리할 자산 번호를 입력하세요. (메뉴 이동: Enter)" -ForegroundColor Cyan
-                    $detailSel = (Read-Host " ▶ 번호 입력").Trim()
-                    if ($detailSel -ne '') {
-                        $selIdx = [int]$detailSel - 1
-                        if ($selIdx -ge 0 -and $selIdx -lt $results.Count) {
-                            Show-AssetDetailManage -AssetID $results[$selIdx].AssetID
-                        } else {
-                            Write-Host " [!] 잘못된 번호입니다." -ForegroundColor Red
-                            Start-Sleep -Seconds 1
-                        }
+                    $selectedAsset = Select-AssetFromTable -AssetList $results
+                    if ($selectedAsset) {
+                        Show-AssetDetailManage -AssetID $selectedAsset.AssetID
                     }
                 }
             } catch {
@@ -1162,18 +1302,9 @@ while ($true) {
                 Write-Host " [!] 등록된 자산이 없습니다." -ForegroundColor Yellow
                 $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
             } else {
-                Show-AssetSummaryTable -AssetList $assets
-                Write-Host "`n 총 자산 수: $($assets.Count) 건" -ForegroundColor Gray
-                Write-Host " [*] 상세 조회 및 계정 관리할 자산 번호를 입력하세요. (메뉴 이동: Enter)" -ForegroundColor Cyan
-                $detailSel = (Read-Host " ▶ 번호 입력").Trim()
-                if ($detailSel -ne '') {
-                    $selIdx = [int]$detailSel - 1
-                    if ($selIdx -ge 0 -and $selIdx -lt $assets.Count) {
-                        Show-AssetDetailManage -AssetID $assets[$selIdx].AssetID
-                    } else {
-                        Write-Host " [!] 잘못된 번호입니다." -ForegroundColor Red
-                        Start-Sleep -Seconds 1
-                    }
+                $selectedAsset = Select-AssetFromTable -AssetList $assets
+                if ($selectedAsset) {
+                    Show-AssetDetailManage -AssetID $selectedAsset.AssetID
                 }
             }
         }
@@ -1325,18 +1456,11 @@ while ($true) {
                 }
 
                 Write-Host "`n [ 검색 결과 ]" -ForegroundColor Green
-                Show-AssetSummaryTable -AssetList $results
-                Write-Host ""
-
-                $selNum = Read-Input " ▶ 수정할 자산의 번호를 입력하세요"
-                $selIdx = [int]$selNum - 1
-                if ($selIdx -lt 0 -or $selIdx -ge $results.Count) {
-                    Write-Host " [!] 잘못된 번호입니다." -ForegroundColor Red
-                    $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
+                $selected = Select-AssetFromTable -AssetList $results
+                if (-not $selected) {
                     break
                 }
 
-                $selected = $results[$selIdx]
                 $origIdx = -1
                 for ($i = 0; $i -lt $assets.Count; $i++) {
                     if ($assets[$i].AssetID -eq $selected.AssetID) { $origIdx = $i; break }
@@ -1389,18 +1513,11 @@ while ($true) {
                 }
 
                 Write-Host "`n [ 검색 결과 ]" -ForegroundColor Green
-                Show-AssetSummaryTable -AssetList $results
-                Write-Host ""
-
-                $selNum = Read-Input " ▶ 삭제할 대상 자산의 번호를 입력하세요"
-                $selIdx = [int]$selNum - 1
-                if ($selIdx -lt 0 -or $selIdx -ge $results.Count) {
-                    Write-Host " [!] 잘못된 번호입니다." -ForegroundColor Red
-                    $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
+                $selected = Select-AssetFromTable -AssetList $results
+                if (-not $selected) {
                     break
                 }
 
-                $selected = $results[$selIdx]
                 $accList = @($selected.Accounts)
 
                 # 자산에 등록된 계정이 2개 이상인 경우 선택지 제공
