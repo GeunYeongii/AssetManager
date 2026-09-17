@@ -410,8 +410,20 @@ function Select-InteractiveMenu {
                 try { [Console]::CursorVisible = $true } catch {}
                 return $MenuItems[$selectedIndex].Key
             }
+            'Escape' {
+                try { [Console]::CursorVisible = $true } catch {}
+                $hasZero = $MenuItems | Where-Object { $_.Key -eq '0' }
+                if ($hasZero) { return '0' }
+                return $null
+            }
             default {
                 $char = $keyInfo.KeyChar.ToString()
+                if ($char -eq 'q' -or $char -eq 'Q' -or $char -eq 'ㅂ') {
+                    try { [Console]::CursorVisible = $true } catch {}
+                    $hasZero = $MenuItems | Where-Object { $_.Key -eq '0' }
+                    if ($hasZero) { return '0' }
+                    return $null
+                }
                 $matched = $MenuItems | Where-Object { $_.Key -eq $char }
                 if ($matched) {
                     try { [Console]::CursorVisible = $true } catch {}
