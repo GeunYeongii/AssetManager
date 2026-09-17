@@ -100,7 +100,7 @@ function Unprotect-LegacyDpapi {
 # 3. 비밀번호 마스킹 입력 함수 (*** 표시)
 function Read-MaskedInput {
     param([string]$PromptText = " ▶ 비밀번호를 입력하세요")
-    Write-Host -NoNewline "$PromptText: "
+    Write-Host -NoNewline "$($PromptText): "
     $pwd = ""
     while ($true) {
         $key = [System.Console]::ReadKey($true)
