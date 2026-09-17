@@ -317,7 +317,112 @@ function Read-Input {
     return $val
 }
 
-# 12. 프로그램 시작: 마스터 비밀번호 인증 및 세션 활성화
+# 12. 인터랙티브 키패드/화살표 선택 메뉴 함수
+function Select-InteractiveMenu {
+    param(
+        [array]$MenuItems,
+        [int]$Columns = 2,
+        [int]$DefaultIndex = 0
+    )
+
+    $selectedIndex = $DefaultIndex
+    $count = $MenuItems.Count
+    $startTop = [Console]::CursorTop
+
+    try { [Console]::CursorVisible = $false } catch {}
+
+    while ($true) {
+        try { [Console]::SetCursorPosition(0, $startTop) } catch {}
+
+        if ($Columns -eq 2) {
+            $rowCount = [Math]::Ceiling($count / 2)
+            for ($row = 0; $row -lt $rowCount; $row++) {
+                $idx1 = $row * 2
+                $idx2 = $idx1 + 1
+
+                $item1 = $MenuItems[$idx1]
+                $isSel1 = ($idx1 -eq $selectedIndex)
+                $prefix1 = if ($isSel1) { " ▶ " } else { "   " }
+                $text1 = "$prefix1$($item1.Label)"
+                $pad1 = Pad-RightDisplay $text1 34
+
+                $line2 = ""
+                $isSel2 = $false
+                if ($idx2 -lt $count) {
+                    $item2 = $MenuItems[$idx2]
+                    $isSel2 = ($idx2 -eq $selectedIndex)
+                    $prefix2 = if ($isSel2) { "▶ " } else { "  " }
+                    $line2 = "$prefix2$($item2.Label)"
+                }
+
+                $color1 = if ($isSel1) { "Cyan" } elseif ($item1.Key -eq '0') { "DarkGray" } else { "White" }
+                $color2 = if ($isSel2) { "Cyan" } elseif ($idx2 -lt $count -and $MenuItems[$idx2].Key -eq '0') { "DarkGray" } else { "White" }
+
+                Write-Host $pad1 -NoNewline -ForegroundColor $color1
+                if ($line2) {
+                    Write-Host $line2 -ForegroundColor $color2
+                } else {
+                    Write-Host ""
+                }
+            }
+        } else {
+            for ($i = 0; $i -lt $count; $i++) {
+                $item = $MenuItems[$i]
+                $isSel = ($i -eq $selectedIndex)
+                $prefix = if ($isSel) { " ▶ " } else { "   " }
+                $color = if ($isSel) { "Cyan" } elseif ($item.Key -eq '0') { "DarkGray" } else { "White" }
+                Write-Host "$prefix$($item.Label)" -ForegroundColor $color
+            }
+        }
+
+        $keyInfo = [Console]::ReadKey($true)
+
+        switch ($keyInfo.Key) {
+            'UpArrow' {
+                if ($Columns -eq 2) {
+                    if ($selectedIndex -ge 2) { $selectedIndex -= 2 }
+                } else {
+                    if ($selectedIndex -gt 0) { $selectedIndex-- }
+                }
+            }
+            'DownArrow' {
+                if ($Columns -eq 2) {
+                    if ($selectedIndex + 2 -lt $count) { $selectedIndex += 2 }
+                } else {
+                    if ($selectedIndex + 1 -lt $count) { $selectedIndex++ }
+                }
+            }
+            'LeftArrow' {
+                if ($Columns -eq 2) {
+                    if ($selectedIndex % 2 -eq 1) { $selectedIndex-- }
+                } else {
+                    if ($selectedIndex -gt 0) { $selectedIndex-- }
+                }
+            }
+            'RightArrow' {
+                if ($Columns -eq 2) {
+                    if ($selectedIndex % 2 -eq 0 -and $selectedIndex + 1 -lt $count) { $selectedIndex++ }
+                } else {
+                    if ($selectedIndex + 1 -lt $count) { $selectedIndex++ }
+                }
+            }
+            'Enter' {
+                try { [Console]::CursorVisible = $true } catch {}
+                return $MenuItems[$selectedIndex].Key
+            }
+            default {
+                $char = $keyInfo.KeyChar.ToString()
+                $matched = $MenuItems | Where-Object { $_.Key -eq $char }
+                if ($matched) {
+                    try { [Console]::CursorVisible = $true } catch {}
+                    return $matched.Key
+                }
+            }
+        }
+    }
+}
+
+# 13. 프로그램 시작: 마스터 비밀번호 인증 및 세션 활성화
 function Initialize-SessionAuth {
     Clear-Host
 
@@ -672,14 +777,13 @@ function Read-NewAccountInput {
     
     # 1. 접속 유형 선택 (CLI vs GUI)
     Write-Host " ▶ 접속 유형을 선택하세요:" -ForegroundColor White
-    Write-Host "   [1] CLI (SSH/Telnet/Console/RDP)" -ForegroundColor DarkGray
-    Write-Host "   [2] GUI (웹콘솔)" -ForegroundColor DarkGray
-    $typeChoice = (Read-Host "   번호 선택 (기본값: 1)").Trim()
+    $typeMenuItems = @(
+        @{ Key = '1'; Label = '[1] CLI (SSH/Telnet/Console/RDP)' },
+        @{ Key = '2'; Label = '[2] GUI (웹콘솔)' }
+    )
+    $typeChoice = Select-InteractiveMenu -MenuItems $typeMenuItems -Columns 1
     
-    $accessType = "CLI"
-    if ($typeChoice -eq '2' -or $typeChoice.ToLower() -eq 'gui') {
-        $accessType = "GUI"
-    }
+    $accessType = if ($typeChoice -eq '2') { "GUI" } else { "CLI" }
 
     $accRole = "-"
 
@@ -777,13 +881,14 @@ function Show-AssetDetailManage {
         Show-AccountListTable -Accounts $accList
 
         Write-Host "`n ───────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
-        Write-Host "   [1] 새 계정 추가              [2] 계정 수정" -ForegroundColor White
-        Write-Host "   [3] 계정 삭제                 [0] 이전 화면으로 돌아가기" -ForegroundColor White
+        $detailMenuItems = @(
+            @{ Key = '1'; Label = '[1] 새 계정 추가' },
+            @{ Key = '2'; Label = '[2] 계정 수정' },
+            @{ Key = '3'; Label = '[3] 계정 삭제' },
+            @{ Key = '0'; Label = '[0] 이전 화면으로 돌아가기' }
+        )
+        $action = Select-InteractiveMenu -MenuItems $detailMenuItems -Columns 2
         Write-Host " ───────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
-
-        while ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null }
-        Write-Host ""
-        $action = (Read-Host " ▶ 작업을 선택하세요").Trim()
 
         switch ($action) {
             # ── 1. 계정 추가 ──
@@ -990,15 +1095,18 @@ while ($true) {
     Clear-Host
     Show-Banner -Title "AssetManager" -Color "Cyan"
     
-    Write-Host "   [1] 자산 검색                 [2] 자산 조회 (전체)" -ForegroundColor White
-    Write-Host "   [3] 자산 추가                 [4] 자산 기본정보 수정" -ForegroundColor White
-    Write-Host "   [5] 자산 삭제                 [6] 마스터 비밀번호 변경" -ForegroundColor White
-    Write-Host "   [0] 프로그램 종료" -ForegroundColor DarkGray
+    $mainMenuItems = @(
+        @{ Key = '1'; Label = '[1] 자산 검색' },
+        @{ Key = '2'; Label = '[2] 자산 조회 (전체)' },
+        @{ Key = '3'; Label = '[3] 자산 추가' },
+        @{ Key = '4'; Label = '[4] 자산 기본정보 수정' },
+        @{ Key = '5'; Label = '[5] 자산 삭제' },
+        @{ Key = '6'; Label = '[6] 마스터 비밀번호 변경' },
+        @{ Key = '0'; Label = '[0] 프로그램 종료' }
+    )
+
+    $choice = Select-InteractiveMenu -MenuItems $mainMenuItems -Columns 2
     Write-Host " ───────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
-    
-    while ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null }
-    Write-Host ""
-    $choice = (Read-Host " ▶ 메뉴 번호를 선택하세요").Trim()
 
     $assets = @(Get-Assets)
 
@@ -1306,12 +1414,14 @@ while ($true) {
                     Show-AccountListTable -Accounts $accList
 
                     Write-Host "`n ───────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
-                    Write-Host "   [1] 특정 계정만 선택하여 삭제" -ForegroundColor Yellow
-                    Write-Host "   [2] 이 자산 전체 및 모든 계정 일괄 삭제" -ForegroundColor Red
-                    Write-Host "   [0] 삭제 취소 (메인 메뉴로 이동)" -ForegroundColor DarkGray
+                    $delMenuItems = @(
+                        @{ Key = '1'; Label = '[1] 특정 계정만 선택하여 삭제' },
+                        @{ Key = '2'; Label = '[2] 이 자산 전체 및 모든 계정 일괄 삭제' },
+                        @{ Key = '0'; Label = '[0] 삭제 취소 (메인 메뉴로 이동)' }
+                    )
+                    $delChoice = Select-InteractiveMenu -MenuItems $delMenuItems -Columns 1
                     Write-Host " ───────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
 
-                    $delChoice = (Read-Host " ▶ 작업을 선택하세요").Trim()
                     if ($delChoice -eq '1') {
                         $delAccNo = Read-Input " ▶ 삭제할 계정 번호를 입력하세요"
                         $delIdx = [int]$delAccNo - 1
