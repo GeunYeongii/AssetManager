@@ -1,5 +1,5 @@
 # ==============================================================================
-# PowerShell 완전 보안 자산 관리자 (AES-256 + PBKDF2 Zero-Knowledge 암호화)
+# PowerShell 완전 보안 자산 관리자 (AES-256 + 다중 계정 계층형 관리)
 # ==============================================================================
 
 $DataFile = "$PSScriptRoot\SecureAssets.dat"
@@ -125,7 +125,39 @@ function Read-MaskedInput {
     return $pwd
 }
 
-# 4. 자산 불러오기 (AES-256)
+# 4. 데이터 정규화 함수 (단일 계정 -> 다중 계정 배열 호환)
+function Normalize-Asset {
+    param($raw)
+    $accList = @()
+    if ($raw.PSObject.Properties['Accounts'] -and $raw.Accounts) {
+        if ($raw.Accounts -is [array]) {
+            $accList = @($raw.Accounts)
+        } else {
+            $accList = @($raw.Accounts)
+        }
+    } elseif ($raw.PSObject.Properties['ID'] -or $raw.PSObject.Properties['PW']) {
+        if ($raw.ID -or $raw.PW) {
+            $accList += [PSCustomObject]@{
+                AccountID   = [guid]::NewGuid().ToString()
+                AccountType = "기본"
+                ID          = [string]$raw.ID
+                PW          = [string]$raw.PW
+                Description = "기존 등록 계정"
+            }
+        }
+    }
+
+    return [PSCustomObject]@{
+        AssetID   = if ($raw.AssetID) { [string]$raw.AssetID } else { [guid]::NewGuid().ToString() }
+        AssetName = [string]$raw.AssetName
+        IP        = [string]$raw.IP
+        WebURL    = [string]$raw.WebURL
+        Note      = [string]$raw.Note
+        Accounts  = $accList
+    }
+}
+
+# 5. 자산 불러오기 (AES-256 + 정규화)
 function Get-Assets {
     if (-not (Test-Path $DataFile)) { return @() }
     try {
@@ -133,33 +165,99 @@ function Get-Assets {
         if ([string]::IsNullOrWhiteSpace($EncryptedText)) { return @() }
         $PlainText = Decrypt-Aes256 -EncryptedBase64 $EncryptedText -Password $Global:SessionPassword
         $result = $PlainText | ConvertFrom-Json
-        if ($result -isnot [array]) {
-            return @($result)
+        $normalized = @()
+        if ($result -is [array]) {
+            foreach ($item in $result) { $normalized += (Normalize-Asset -raw $item) }
+        } elseif ($null -ne $result) {
+            $normalized += (Normalize-Asset -raw $result)
         }
-        return $result
+        return $normalized
     } catch {
         Write-Warning "자산 데이터 복호화 실패: $($_.Exception.Message)"
         return @()
     }
 }
 
-# 5. 자산 저장하기 (AES-256)
+# 6. 자산 저장하기 (AES-256)
 function Save-Assets {
     param([array]$Assets)
     if ($Assets.Count -eq 0) {
         $JsonText = '[]'
     } else {
-        $JsonText = ConvertTo-Json -InputObject @($Assets) -Depth 3 -Compress
+        $JsonText = ConvertTo-Json -InputObject @($Assets) -Depth 5 -Compress
     }
     $EncryptedText = Encrypt-Aes256 -PlainText $JsonText -Password $Global:SessionPassword
     [System.IO.File]::WriteAllText($DataFile, $EncryptedText, [System.Text.UTF8Encoding]::new($false))
 }
 
-# 6. 프로그램 실행 시 마스터 비밀번호 인증 / 초기화 / 마이그레이션
+# 7. 한글 및 영문 너비 계산용 유틸리티
+function Get-DisplayWidth {
+    param([string]$str)
+    if ($null -eq $str) { return 0 }
+    $width = 0
+    foreach ($c in $str.ToCharArray()) {
+        $code = [int]$c
+        if (($code -ge 0xAC00 -and $code -le 0xD7A3) -or 
+            ($code -ge 0x1100 -and $code -le 0x11FF) -or 
+            ($code -ge 0x3130 -and $code -le 0x318F) -or 
+            ($code -ge 0x3200 -and $code -le 0x32FF) -or 
+            ($code -ge 0x3400 -and $code -le 0x4DBF) -or 
+            ($code -ge 0x4E00 -and $code -le 0x9FFF) -or 
+            ($code -ge 0xF900 -and $code -le 0xFAFF) -or 
+            ($code -ge 0xFF00 -and $code -le 0xFFEF)) {
+            $width += 2
+        } else {
+            $width += 1
+        }
+    }
+    return $width
+}
+
+function Pad-RightDisplay {
+    param([string]$str, [int]$totalWidth)
+    if ($null -eq $str) { $str = "" }
+    $w = Get-DisplayWidth $str
+    $pad = $totalWidth - $w
+    if ($pad -gt 0) { return $str + (" " * $pad) }
+    return $str
+}
+
+# 8. UI 공통 배너
+function Show-Banner {
+    param([string]$Title, [string]$Color = "Cyan")
+    Write-Host " ╔═════════════════════════════════════════════════════════════╗" -ForegroundColor $Color
+    $w = Get-DisplayWidth "[ $Title ]"
+    $leftPad = [Math]::Floor((61 - $w) / 2)
+    $rightPad = 61 - $w - $leftPad
+    $line = " ║" + (" " * $leftPad) + "[ $Title ]" + (" " * $rightPad) + "║"
+    Write-Host $line -ForegroundColor $Color
+    Write-Host " ╚═════════════════════════════════════════════════════════════╝`n" -ForegroundColor $Color
+}
+
+# 9. 사용자 입력 처리
+function Read-Input {
+    param(
+        [string]$PromptText,
+        [bool]$AllowEmpty = $false,
+        [bool]$IsEditMode = $false
+    )
+    $val = (Read-Host $PromptText).Trim()
+    
+    if ($val -eq 'q' -or $val -eq 'Q' -or $val -eq 'ㅂ') {
+        throw [System.Exception]::new("CANCEL_ACTION")
+    }
+    
+    if ($val -eq '' -and -not $AllowEmpty -and -not $IsEditMode) {
+        throw [System.Exception]::new("CANCEL_ACTION")
+    }
+    
+    return $val
+}
+
+# 10. 프로그램 시작: 마스터 비밀번호 인증 및 세션 활성화
 function Initialize-SessionAuth {
     Clear-Host
 
-    # 데이터 파일이 존재하고 레거시 DPAPI 포맷인지 확인
     $needsMigration = $false
     $migratedAssets = @()
 
@@ -175,12 +273,15 @@ function Initialize-SessionAuth {
                 }
             } catch { $isAesFormat = $false }
 
-            # AES 포맷이 아닌 경우 기존 DPAPI 복호화 시도
             if (-not $isAesFormat) {
                 try {
                     $legacyPlain = Unprotect-LegacyDpapi -EncryptedText $rawContent
                     $parsed = $legacyPlain | ConvertFrom-Json
-                    if ($parsed -is [array]) { $migratedAssets = @($parsed) } else { $migratedAssets = @($parsed) }
+                    if ($parsed -is [array]) {
+                        foreach ($p in $parsed) { $migratedAssets += (Normalize-Asset -raw $p) }
+                    } elseif ($null -ne $parsed) {
+                        $migratedAssets += (Normalize-Asset -raw $parsed)
+                    }
                     $needsMigration = $true
                 } catch {
                     $needsMigration = $false
@@ -189,7 +290,6 @@ function Initialize-SessionAuth {
         }
     }
 
-    # 데이터 파일이 없거나 레거시 마이그레이션이 필요한 경우
     if ((-not (Test-Path $DataFile)) -or $needsMigration) {
         Show-Banner -Title "AssetManager 초기 설정" -Color "Yellow"
         if ($needsMigration) {
@@ -226,7 +326,6 @@ function Initialize-SessionAuth {
         return
     }
 
-    # 기존 AES 데이터 파일이 있는 경우 -> 비밀번호로 복호화 검증
     $encryptedContent = (Get-Content $DataFile -Raw).Trim()
     $maxAttempts = 5
     $attempts = 0
@@ -245,7 +344,6 @@ function Initialize-SessionAuth {
         }
 
         try {
-            # 실제 복호화 시도로 비밀번호 검증
             $null = Decrypt-Aes256 -EncryptedBase64 $encryptedContent -Password $inputPwd
             $Global:SessionPassword = $inputPwd
             Write-Host "`n [v] 인증 성공! 자산 관리자를 시작합니다." -ForegroundColor Green
@@ -264,7 +362,7 @@ function Initialize-SessionAuth {
     exit
 }
 
-# 7. 마스터 비밀번호 변경 (전체 데이터 재암호화)
+# 11. 마스터 비밀번호 변경
 function Change-MasterPasswordFlow {
     try {
         Clear-Host
@@ -292,10 +390,7 @@ function Change-MasterPasswordFlow {
             return
         }
 
-        # 기존 자산 가져오기
         $assets = @(Get-Assets)
-        
-        # 새 비밀번호로 세션 교체 후 저장 (재암호화)
         $Global:SessionPassword = $newPwd1
         Save-Assets -Assets $assets
 
@@ -307,7 +402,49 @@ function Change-MasterPasswordFlow {
     }
 }
 
-# 8. 자산 검색 공통 함수
+# 12. 전체/검색 자산 요약 목록 출력 함수
+function Show-AssetSummaryTable {
+    param([array]$AssetList)
+
+    $hNo    = Pad-RightDisplay "번호" 6
+    $hName  = Pad-RightDisplay "자산명" 18
+    $hIP    = Pad-RightDisplay "IP주소" 18
+    $hAccs  = Pad-RightDisplay "등록계정(수)" 20
+    $hURL   = Pad-RightDisplay "접속URL" 24
+    $hNote  = Pad-RightDisplay "비고" 18
+
+    Write-Host " $hNo $hName $hIP $hAccs $hURL $hNote" -ForegroundColor DarkGray
+    Write-Host " ────   ────────────────  ────────────────  ──────────────────  ──────────────────────  ────────────────" -ForegroundColor DarkGray
+
+    for ($i = 0; $i -lt $AssetList.Count; $i++) {
+        $a = $AssetList[$i]
+        $noStr = ($i + 1).ToString()
+
+        # 등록 계정 요약 텍스트
+        $accCount = if ($a.Accounts) { $a.Accounts.Count } else { 0 }
+        $accSummary = "계정 없음 (0)"
+        if ($accCount -eq 1) {
+            $first = $a.Accounts[0]
+            $typeStr = if ($first.AccountType) { "[$($first.AccountType)] " } else { "" }
+            $accSummary = "$typeStr$($first.ID)"
+        } elseif ($accCount -gt 1) {
+            $first = $a.Accounts[0]
+            $typeStr = if ($first.AccountType) { "[$($first.AccountType)] " } else { "" }
+            $accSummary = "$typeStr$($first.ID) 외 $($accCount - 1)개"
+        }
+
+        $cNo   = Pad-RightDisplay $noStr 6
+        $cName = Pad-RightDisplay $a.AssetName 18
+        $cIP   = Pad-RightDisplay $a.IP 18
+        $cAccs = Pad-RightDisplay $accSummary 20
+        $cURL  = Pad-RightDisplay $a.WebURL 24
+        $cNote = Pad-RightDisplay $a.Note 18
+
+        Write-Host " $cNo $cName $cIP $cAccs $cURL $cNote" -ForegroundColor White
+    }
+}
+
+# 13. 자산 검색 (다중 계정 ID/타입/설명까지 검색)
 function Search-Assets {
     param([array]$AllAssets, [string]$Keyword)
     $isIPLike = $Keyword -match '^[\d\.\:]+$'
@@ -318,123 +455,236 @@ function Search-Assets {
         Write-Host "`n [*] IP/URL 검색 모드로 동작합니다. (검색어: '$Keyword')" -ForegroundColor Cyan
     } else {
         $results = $AllAssets | Where-Object {
-            $_.AssetName -like "*$Keyword*" -or
-            $_.Note -like "*$Keyword*" -or
-            $_.ID -like "*$Keyword*" -or
-            $_.PW -like "*$Keyword*"
+            $foundInAcc = $false
+            if ($_.Accounts) {
+                foreach ($acc in $_.Accounts) {
+                    if ($acc.ID -like "*$Keyword*" -or $acc.AccountType -like "*$Keyword*" -or $acc.Description -like "*$Keyword*" -or $acc.PW -like "*$Keyword*") {
+                        $foundInAcc = $true
+                        break
+                    }
+                }
+            }
+            $_.AssetName -like "*$Keyword*" -or $_.Note -like "*$Keyword*" -or $foundInAcc
         }
-        Write-Host "`n [*] 텍스트 검색 모드로 동작합니다. (검색어: '$Keyword')" -ForegroundColor Cyan
+        Write-Host "`n [*] 통합 텍스트 검색 모드로 동작합니다. (검색어: '$Keyword')" -ForegroundColor Cyan
     }
     return @($results)
 }
 
-# 9. 한글 및 영문 너비 계산용 유틸리티
-function Get-DisplayWidth {
-    param([string]$str)
-    if ($null -eq $str) { return 0 }
-    $width = 0
-    foreach ($c in $str.ToCharArray()) {
-        $code = [int]$c
-        if (($code -ge 0xAC00 -and $code -le 0xD7A3) -or 
-            ($code -ge 0x1100 -and $code -le 0x11FF) -or 
-            ($code -ge 0x3130 -and $code -le 0x318F) -or 
-            ($code -ge 0x3200 -and $code -le 0x32FF) -or 
-            ($code -ge 0x3400 -and $code -le 0x4DBF) -or 
-            ($code -ge 0x4E00 -and $code -le 0x9FFF) -or 
-            ($code -ge 0xF900 -and $code -le 0xFAFF) -or 
-            ($code -ge 0xFF00 -and $code -le 0xFFEF)) {
-            $width += 2
+# 14. 자산 상세 정보 및 하위 계정 관리 화면
+function Show-AssetDetailManage {
+    param([string]$AssetID)
+
+    $showPasswords = $false
+
+    while ($true) {
+        $allAssets = @(Get-Assets)
+        $targetAsset = $allAssets | Where-Object { $_.AssetID -eq $AssetID }
+        if (-not $targetAsset) {
+            Write-Host "`n [!] 해당 자산을 찾을 수 없습니다." -ForegroundColor Red
+            Start-Sleep -Seconds 1
+            return
+        }
+
+        Clear-Host
+        Show-Banner -Title "자산 상세 정보 & 계정 관리" -Color "Green"
+
+        Write-Host " [ 자산 기본 정보 ]" -ForegroundColor Cyan
+        Write-Host "  * 자산명 : $($targetAsset.AssetName)" -ForegroundColor White
+        Write-Host "  * IP 주소: $($targetAsset.IP)" -ForegroundColor White
+        Write-Host "  * 접속URL: $($targetAsset.WebURL)" -ForegroundColor White
+        Write-Host "  * 비고   : $($targetAsset.Note)" -ForegroundColor White
+        Write-Host " ───────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
+
+        $accList = @($targetAsset.Accounts)
+        Write-Host " [ 등록된 계정 목록 (총 $($accList.Count)개) ]" -ForegroundColor Yellow
+
+        if ($accList.Count -eq 0) {
+            Write-Host "   (등록된 계정이 없습니다. [1]번을 눌러 새 계정을 추가하세요.)" -ForegroundColor Gray
         } else {
-            $width += 1
+            $hNo    = Pad-RightDisplay "번호" 6
+            $hType  = Pad-RightDisplay "구분/역할" 14
+            $hID    = Pad-RightDisplay "계정 ID" 16
+            $hPW    = Pad-RightDisplay "패스워드" 18
+            $hDesc  = Pad-RightDisplay "계정 설명/메모" 20
+
+            Write-Host "  $hNo $hType $hID $hPW $hDesc" -ForegroundColor DarkGray
+            Write-Host "  ────   ────────────  ──────────────  ────────────────  ────────────────────" -ForegroundColor DarkGray
+
+            for ($i = 0; $i -lt $accList.Count; $i++) {
+                $acc = $accList[$i]
+                $noStr = ($i + 1).ToString()
+                $typeStr = if ($acc.AccountType) { "[$($acc.AccountType)]" } else { "[-]" }
+                $pwStr = if ($showPasswords) { $acc.PW } else { "********" }
+
+                $cNo   = Pad-RightDisplay $noStr 6
+                $cType = Pad-RightDisplay $typeStr 14
+                $cID   = Pad-RightDisplay $acc.ID 16
+                $cPW   = Pad-RightDisplay $pwStr 18
+                $cDesc = Pad-RightDisplay $acc.Description 20
+
+                Write-Host "  $cNo $cType $cID $cPW $cDesc" -ForegroundColor White
+            }
+        }
+
+        Write-Host "`n ───────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
+        $pwToggleLabel = if ($showPasswords) { "비밀번호 가리기 (숨김)" } else { "비밀번호 보기 (표시)" }
+        Write-Host "   [1] 새 계정 추가              [2] 계정 수정" -ForegroundColor White
+        Write-Host "   [3] 계정 삭제                 [4] $pwToggleLabel" -ForegroundColor White
+        Write-Host "   [0] 이전 화면으로 돌아가기" -ForegroundColor DarkGray
+        Write-Host " ───────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
+
+        while ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null }
+        Write-Host ""
+        $action = (Read-Host " ▶ 작업을 선택하세요").Trim()
+
+        switch ($action) {
+            # ── 1. 계정 추가 ──
+            '1' {
+                try {
+                    Write-Host "`n [ 새 계정 추가 ] ('q' 입력 시 취소)" -ForegroundColor Cyan
+                    $inType = Read-Input " ▶ 계정 구분/역할 (예: root, admin, webuser, dev 등)"
+                    $inID   = Read-Input " ▶ 계정 ID"
+                    $inPW   = Read-Input " ▶ 패스워드"
+                    $inDesc = Read-Input " ▶ 계정 설명/메모" -AllowEmpty $true
+
+                    $newAcc = [PSCustomObject]@{
+                        AccountID   = [guid]::NewGuid().ToString()
+                        AccountType = $inType
+                        ID          = $inID
+                        PW          = $inPW
+                        Description = $inDesc
+                    }
+
+                    for ($i = 0; $i -lt $allAssets.Count; $i++) {
+                        if ($allAssets[$i].AssetID -eq $AssetID) {
+                            $allAssets[$i].Accounts += $newAcc
+                            break
+                        }
+                    }
+                    Save-Assets -Assets $allAssets
+                    Write-Host "`n [v] 계정이 성공적으로 추가되었습니다." -ForegroundColor Green
+                    Start-Sleep -Seconds 1
+                } catch {
+                    if ($_.Exception.Message -eq "CANCEL_ACTION") {
+                        Write-Host "`n [-] 취소되었습니다." -ForegroundColor Yellow
+                        Start-Sleep -Milliseconds 600
+                    } else { throw $_ }
+                }
+            }
+
+            # ── 2. 계정 수정 ──
+            '2' {
+                try {
+                    if ($accList.Count -eq 0) {
+                        Write-Host "`n [!] 수정할 계정이 없습니다." -ForegroundColor Yellow
+                        Start-Sleep -Seconds 1
+                        break
+                    }
+                    $selNo = Read-Input " ▶ 수정할 계정 번호를 입력하세요"
+                    $idx = [int]$selNo - 1
+                    if ($idx -lt 0 -or $idx -ge $accList.Count) {
+                        Write-Host " [!] 올바른 번호가 아닙니다." -ForegroundColor Red
+                        Start-Sleep -Seconds 1
+                        break
+                    }
+
+                    $targetAcc = $accList[$idx]
+                    Write-Host "`n [*] 수정할 값을 입력하세요. (기존 유지 시 Enter, 취소 시 q)" -ForegroundColor Cyan
+                    $uType = Read-Input " ▶ 계정 구분 [$($targetAcc.AccountType)]" -IsEditMode $true
+                    $uID   = Read-Input " ▶ 계정 ID [$($targetAcc.ID)]" -IsEditMode $true
+                    $uPW   = Read-Input " ▶ 패스워드 [********]" -IsEditMode $true
+                    $uDesc = Read-Input " ▶ 계정 설명 [$($targetAcc.Description)]" -IsEditMode $true
+
+                    for ($i = 0; $i -lt $allAssets.Count; $i++) {
+                        if ($allAssets[$i].AssetID -eq $AssetID) {
+                            for ($j = 0; $j -lt $allAssets[$i].Accounts.Count; $j++) {
+                                if ($allAssets[$i].Accounts[$j].AccountID -eq $targetAcc.AccountID) {
+                                    if ($uType) { $allAssets[$i].Accounts[$j].AccountType = $uType }
+                                    if ($uID)   { $allAssets[$i].Accounts[$j].ID = $uID }
+                                    if ($uPW)   { $allAssets[$i].Accounts[$j].PW = $uPW }
+                                    if ($uDesc) { $allAssets[$i].Accounts[$j].Description = $uDesc }
+                                    break
+                                }
+                            }
+                            break
+                        }
+                    }
+                    Save-Assets -Assets $allAssets
+                    Write-Host "`n [v] 계정 정보가 수정되었습니다." -ForegroundColor Green
+                    Start-Sleep -Seconds 1
+                } catch {
+                    if ($_.Exception.Message -eq "CANCEL_ACTION") {
+                        Write-Host "`n [-] 취소되었습니다." -ForegroundColor Yellow
+                        Start-Sleep -Milliseconds 600
+                    } else { throw $_ }
+                }
+            }
+
+            # ── 3. 계정 삭제 ──
+            '3' {
+                try {
+                    if ($accList.Count -eq 0) {
+                        Write-Host "`n [!] 삭제할 계정이 없습니다." -ForegroundColor Yellow
+                        Start-Sleep -Seconds 1
+                        break
+                    }
+                    $selNo = Read-Input " ▶ 삭제할 계정 번호를 입력하세요"
+                    $idx = [int]$selNo - 1
+                    if ($idx -lt 0 -or $idx -ge $accList.Count) {
+                        Write-Host " [!] 올바른 번호가 아닙니다." -ForegroundColor Red
+                        Start-Sleep -Seconds 1
+                        break
+                    }
+
+                    $targetAcc = $accList[$idx]
+                    $confirm = Read-Input " ▶ '[$($targetAcc.AccountType)] $($targetAcc.ID)' 계정을 삭제하시겠습니까? (Y/N)" -AllowEmpty $true
+                    if ($confirm -match '^[Yy]$') {
+                        for ($i = 0; $i -lt $allAssets.Count; $i++) {
+                            if ($allAssets[$i].AssetID -eq $AssetID) {
+                                $allAssets[$i].Accounts = @($allAssets[$i].Accounts | Where-Object { $_.AccountID -ne $targetAcc.AccountID })
+                                break
+                            }
+                        }
+                        Save-Assets -Assets $allAssets
+                        Write-Host "`n [v] 계정이 삭제되었습니다." -ForegroundColor Green
+                        Start-Sleep -Seconds 1
+                    }
+                } catch {
+                    if ($_.Exception.Message -eq "CANCEL_ACTION") {
+                        Write-Host "`n [-] 취소되었습니다." -ForegroundColor Yellow
+                        Start-Sleep -Milliseconds 600
+                    } else { throw $_ }
+                }
+            }
+
+            # ── 4. 비밀번호 토글 ──
+            '4' {
+                $showPasswords = -not $showPasswords
+            }
+
+            # ── 0. 뒤로가기 ──
+            '0' {
+                return
+            }
+
+            default {}
         }
     }
-    return $width
-}
-
-function Pad-RightDisplay {
-    param([string]$str, [int]$totalWidth)
-    if ($null -eq $str) { $str = "" }
-    $w = Get-DisplayWidth $str
-    $pad = $totalWidth - $w
-    if ($pad -gt 0) { return $str + (" " * $pad) }
-    return $str
-}
-
-# 10. 검색 결과를 표로 출력
-function Show-NumberedResults {
-    param([array]$Results)
-    
-    $hNo   = Pad-RightDisplay "번호" 6
-    $hName = Pad-RightDisplay "자산명" 18
-    $hIP   = Pad-RightDisplay "IP주소" 18
-    $hID   = Pad-RightDisplay "계정ID" 16
-    $hPW   = Pad-RightDisplay "패스워드" 16
-    $hURL  = Pad-RightDisplay "접속URL" 28
-    $hNote = Pad-RightDisplay "비고" 18
-    
-    Write-Host " $hNo $hName $hIP $hID $hPW $hURL $hNote" -ForegroundColor DarkGray
-    Write-Host " ────   ────────────────  ────────────────  ──────────────  ──────────────  ──────────────────────────  ────────────────" -ForegroundColor DarkGray
-    
-    for ($i = 0; $i -lt $Results.Count; $i++) {
-        $r = $Results[$i]
-        $noStr = ($i + 1).ToString()
-        
-        $cNo   = Pad-RightDisplay $noStr 6
-        $cName = Pad-RightDisplay $r.AssetName 18
-        $cIP   = Pad-RightDisplay $r.IP 18
-        $cID   = Pad-RightDisplay $r.ID 16
-        $cPW   = Pad-RightDisplay $r.PW 16
-        $cURL  = Pad-RightDisplay $r.WebURL 28
-        $cNote = Pad-RightDisplay $r.Note 18
-        
-        Write-Host " $cNo $cName $cIP $cID $cPW $cURL $cNote" -ForegroundColor White
-    }
-}
-
-# 11. UI 공통 배너
-function Show-Banner {
-    param([string]$Title, [string]$Color = "Cyan")
-    Write-Host " ╔═════════════════════════════════════════════════════════════╗" -ForegroundColor $Color
-    $w = Get-DisplayWidth "[ $Title ]"
-    $leftPad = [Math]::Floor((61 - $w) / 2)
-    $rightPad = 61 - $w - $leftPad
-    $line = " ║" + (" " * $leftPad) + "[ $Title ]" + (" " * $rightPad) + "║"
-    Write-Host $line -ForegroundColor $Color
-    Write-Host " ╚═════════════════════════════════════════════════════════════╝`n" -ForegroundColor $Color
-}
-
-# 12. 사용자 입력 및 취소 처리
-function Read-Input {
-    param(
-        [string]$PromptText,
-        [bool]$AllowEmpty = $false,
-        [bool]$IsEditMode = $false
-    )
-    $val = (Read-Host $PromptText).Trim()
-    
-    if ($val -eq 'q' -or $val -eq 'Q' -or $val -eq 'ㅂ') {
-        throw [System.Exception]::new("CANCEL_ACTION")
-    }
-    
-    if ($val -eq '' -and -not $AllowEmpty -and -not $IsEditMode) {
-        throw [System.Exception]::new("CANCEL_ACTION")
-    }
-    
-    return $val
 }
 
 # ─────────────────────────────────────────────────────────────
-# 13. 프로그램 시작: 마스터 비밀번호 인증 및 세션 활성화
+# 15. 프로그램 시작: 세션 인증
 # ─────────────────────────────────────────────────────────────
 Initialize-SessionAuth
 
-# 14. 메인 메뉴 루프
+# 16. 메인 메뉴 루프
 while ($true) {
     Clear-Host
     Show-Banner -Title "AssetManager" -Color "Cyan"
     
     Write-Host "   [1] 자산 검색                 [2] 자산 조회 (전체)" -ForegroundColor White
-    Write-Host "   [3] 자산 추가                 [4] 자산 수정" -ForegroundColor White
+    Write-Host "   [3] 자산 추가                 [4] 자산 기본정보 수정" -ForegroundColor White
     Write-Host "   [5] 자산 삭제                 [6] 마스터 비밀번호 변경" -ForegroundColor White
     Write-Host "   [0] 프로그램 종료" -ForegroundColor DarkGray
     Write-Host " ───────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
@@ -451,7 +701,7 @@ while ($true) {
             try {
                 Clear-Host
                 Show-Banner -Title "자 산 검 색" -Color "Green"
-                Write-Host " [*] 빈칸 상태로 Enter를 누르거나 'q'를 입력하면 메뉴로 돌아갑니다.`n" -ForegroundColor Gray
+                Write-Host " [*] 빈칸 Enter 또는 'q'를 누르면 메인 메뉴로 돌아갑니다.`n" -ForegroundColor Gray
                 
                 if ($assets.Count -eq 0) {
                     Write-Host " [!] 등록된 자산이 없습니다." -ForegroundColor Yellow
@@ -459,21 +709,31 @@ while ($true) {
                     break
                 }
                 
-                $keyword = Read-Input " ▶ 검색어를 입력하세요"
+                $keyword = Read-Input " ▶ 검색어를 입력하세요 (IP, 자산명, 계정ID, 역할 등)"
                 
                 $results = @(Search-Assets -AllAssets $assets -Keyword $keyword)
                 if ($results.Count -eq 0) {
                     Write-Host " [!] 검색 결과가 없습니다." -ForegroundColor Yellow
+                    $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
                 } else {
-                    Write-Host "`n [ 검색 결과 ]" -ForegroundColor Green
-                    Show-NumberedResults -Results $results
-                    Write-Host "`n 총 검색된 자산: $($results.Count) 건" -ForegroundColor Gray
+                    Write-Host "`n [ 검색 결과 (총 $($results.Count)건) ]" -ForegroundColor Green
+                    Show-AssetSummaryTable -AssetList $results
+                    Write-Host "`n [*] 상세 조회 및 계정 관리할 자산 번호를 입력하세요. (메뉴 이동: Enter)" -ForegroundColor Cyan
+                    $detailSel = (Read-Host " ▶ 번호 입력").Trim()
+                    if ($detailSel -ne '') {
+                        $selIdx = [int]$detailSel - 1
+                        if ($selIdx -ge 0 -and $selIdx -lt $results.Count) {
+                            Show-AssetDetailManage -AssetID $results[$selIdx].AssetID
+                        } else {
+                            Write-Host " [!] 잘못된 번호입니다." -ForegroundColor Red
+                            Start-Sleep -Seconds 1
+                        }
+                    }
                 }
-                $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
             } catch {
                 if ($_.Exception.Message -eq "CANCEL_ACTION") {
-                    Write-Host "`n [-] 작업이 취소되어 메인 메뉴로 돌아갑니다." -ForegroundColor Yellow
-                    Start-Sleep -Seconds 1
+                    Write-Host "`n [-] 메인 메뉴로 돌아갑니다." -ForegroundColor Yellow
+                    Start-Sleep -Milliseconds 600
                 } else { throw $_ }
             }
         }
@@ -485,46 +745,100 @@ while ($true) {
             
             if ($assets.Count -eq 0) {
                 Write-Host " [!] 등록된 자산이 없습니다." -ForegroundColor Yellow
+                $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
             } else {
-                Show-NumberedResults -Results $assets
+                Show-AssetSummaryTable -AssetList $assets
                 Write-Host "`n 총 자산 수: $($assets.Count) 건" -ForegroundColor Gray
+                Write-Host " [*] 상세 조회 및 계정 관리할 자산 번호를 입력하세요. (메뉴 이동: Enter)" -ForegroundColor Cyan
+                $detailSel = (Read-Host " ▶ 번호 입력").Trim()
+                if ($detailSel -ne '') {
+                    $selIdx = [int]$detailSel - 1
+                    if ($selIdx -ge 0 -and $selIdx -lt $assets.Count) {
+                        Show-AssetDetailManage -AssetID $assets[$selIdx].AssetID
+                    } else {
+                        Write-Host " [!] 잘못된 번호입니다." -ForegroundColor Red
+                        Start-Sleep -Seconds 1
+                    }
+                }
             }
-            $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
         }
 
-        # ── 3. 자산 추가 ──
+        # ── 3. 새 자산 추가 ──
         '3' { 
             try {
                 Clear-Host
                 Show-Banner -Title "새 자산 추가" -Color "Yellow"
-                Write-Host " [*] 중간에 취소하려면 언제든 'q'를 입력하거나 빈칸 상태에서 Enter를 누르세요.`n" -ForegroundColor Gray
+                Write-Host " [*] 취소하려면 언제든 'q'를 입력하거나 빈칸에서 Enter를 누르세요.`n" -ForegroundColor Gray
                 
-                $inputName = Read-Input " ▶ 1. 자산 이름"
+                $inputName = Read-Input " ▶ 1. 자산 이름 (예: 운영 DB서버, 웹서버01 등)"
                 $inputIP   = Read-Input " ▶ 2. IP 주소"
 
-                # IP 중복 체크
+                # IP가 이미 있는 경우 알림 (다중 등록 허용 여부 안내)
                 $duplicate = $assets | Where-Object { $_.IP -eq $inputIP }
                 if ($duplicate) {
-                    Write-Host "`n [!] 이미 동일한 IP를 가진 자산이 존재합니다." -ForegroundColor Red
-                    Write-Host " ──────────────────────────────────────────" -ForegroundColor Red
-                    Show-NumberedResults -Results @($duplicate)
-                    Write-Host " [!] 자산 추가가 중단되었습니다." -ForegroundColor Yellow
-                    $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
-                    break
+                    Write-Host "`n [!] 알림: 동일한 IP($inputIP)를 사용하는 자산이 이미 존재합니다: '$($duplicate.AssetName)'" -ForegroundColor Yellow
+                    $proceed = Read-Input " ▶ 그래도 별도 자산으로 추가하시겠습니까? (Y/N)" -AllowEmpty $true
+                    if ($proceed -notmatch '^[Yy]$') {
+                        Write-Host " [!] 자산 추가가 취소되었습니다. 기존 자산에 계정을 추가하려면 [2]번 조회를 이용하세요." -ForegroundColor Yellow
+                        $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
+                        break
+                    }
+                }
+
+                $inputURL  = Read-Input " ▶ 3. 접속 URL (포트 포함, 없을 시 Enter)" -AllowEmpty $true
+                $inputNote = Read-Input " ▶ 4. 비고 / 메모 (없을 시 Enter)" -AllowEmpty $true
+
+                # 첫 번째 계정 등록
+                Write-Host "`n [ 첫 번째 계정 정보 등록 ]" -ForegroundColor Cyan
+                $accType = Read-Input " ▶ 5. 계정 구분/역할 (예: root, admin, user 등)"
+                $accID   = Read-Input " ▶ 6. 계정 ID"
+                $accPW   = Read-Input " ▶ 7. 패스워드"
+                $accDesc = Read-Input " ▶ 8. 계정 설명 (선택, 없을 시 Enter)" -AllowEmpty $true
+
+                $newAccounts = @(
+                    [PSCustomObject]@{
+                        AccountID   = [guid]::NewGuid().ToString()
+                        AccountType = $accType
+                        ID          = $accID
+                        PW          = $accPW
+                        Description = $accDesc
+                    }
+                )
+
+                # 추가 계정 연속 등록 여부
+                while ($true) {
+                    Write-Host ""
+                    $more = Read-Input " ▶ 이 자산에 계정을 더 추가하시겠습니까? (Y/N)" -AllowEmpty $true
+                    if ($more -match '^[Yy]$') {
+                        Write-Host "`n [ 추가 계정 등록 ]" -ForegroundColor Cyan
+                        $mType = Read-Input " ▶ 계정 구분/역할 (예: admin, devuser 등)"
+                        $mID   = Read-Input " ▶ 계정 ID"
+                        $mPW   = Read-Input " ▶ 패스워드"
+                        $mDesc = Read-Input " ▶ 계정 설명 (선택)" -AllowEmpty $true
+                        $newAccounts += [PSCustomObject]@{
+                            AccountID   = [guid]::NewGuid().ToString()
+                            AccountType = $mType
+                            ID          = $mID
+                            PW          = $mPW
+                            Description = $mDesc
+                        }
+                    } else {
+                        break
+                    }
                 }
 
                 $newAsset = [PSCustomObject]@{
                     AssetID   = [guid]::NewGuid().ToString()
                     AssetName = $inputName
                     IP        = $inputIP
-                    ID        = Read-Input " ▶ 3. 계정 ID"
-                    PW        = Read-Input " ▶ 4. 계정 PW"
-                    WebURL    = Read-Input " ▶ 5. 접속 URL (포트 포함)"
-                    Note      = Read-Input " ▶ 6. 비고"
+                    WebURL    = $inputURL
+                    Note      = $inputNote
+                    Accounts  = $newAccounts
                 }
+
                 $assets += $newAsset
                 Save-Assets -Assets $assets
-                Write-Host "`n [v] 자산이 성공적으로 추가되었습니다." -ForegroundColor Green
+                Write-Host "`n [v] 자산 및 계정 $($newAccounts.Count)개가 성공적으로 등록되었습니다!" -ForegroundColor Green
                 $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
             } catch {
                 if ($_.Exception.Message -eq "CANCEL_ACTION") {
@@ -534,11 +848,11 @@ while ($true) {
             }
         }
 
-        # ── 4. 자산 수정 ──
+        # ── 4. 자산 기본정보 수정 ──
         '4' { 
             try {
                 Clear-Host
-                Show-Banner -Title "자 산 수 정" -Color "Magenta"
+                Show-Banner -Title "자산 기본정보 수정" -Color "Magenta"
                 Write-Host " [*] 검색 및 대상 선택 중 빈칸 Enter 또는 'q'를 입력하면 취소됩니다.`n" -ForegroundColor Gray
                 
                 if ($assets.Count -eq 0) {
@@ -548,7 +862,6 @@ while ($true) {
                 }
                 
                 $keyword = Read-Input " ▶ 수정할 자산을 검색하세요"
-                
                 $results = @(Search-Assets -AllAssets $assets -Keyword $keyword)
                 if ($results.Count -eq 0) {
                     Write-Host " [!] 검색 결과가 없습니다." -ForegroundColor Yellow
@@ -557,7 +870,7 @@ while ($true) {
                 }
 
                 Write-Host "`n [ 검색 결과 ]" -ForegroundColor Green
-                Show-NumberedResults -Results $results
+                Show-AssetSummaryTable -AssetList $results
                 Write-Host ""
 
                 $selNum = Read-Input " ▶ 수정할 자산의 번호를 입력하세요"
@@ -574,28 +887,22 @@ while ($true) {
                     if ($assets[$i].AssetID -eq $selected.AssetID) { $origIdx = $i; break }
                 }
 
-                Write-Host "`n [*] 새로운 값을 입력하세요. (기존 유지 시 Enter, 수정 완전 취소 시 q 입력)" -ForegroundColor Cyan
-
+                Write-Host "`n [*] 수정할 값을 입력하세요. (기존 유지 시 Enter, 취소 시 q)" -ForegroundColor Cyan
                 $newName = Read-Input " ▶ 1. 자산 이름 [$($assets[$origIdx].AssetName)]" -IsEditMode $true
                 if ($newName) { $assets[$origIdx].AssetName = $newName }
 
                 $newIP = Read-Input " ▶ 2. IP 주소 [$($assets[$origIdx].IP)]" -IsEditMode $true
                 if ($newIP) { $assets[$origIdx].IP = $newIP }
 
-                $newID = Read-Input " ▶ 3. 계정 ID [$($assets[$origIdx].ID)]" -IsEditMode $true
-                if ($newID) { $assets[$origIdx].ID = $newID }
-
-                $newPW = Read-Input " ▶ 4. 계정 PW [********]" -IsEditMode $true
-                if ($newPW) { $assets[$origIdx].PW = $newPW }
-
-                $newURL = Read-Input " ▶ 5. 접속 URL [$($assets[$origIdx].WebURL)]" -IsEditMode $true
+                $newURL = Read-Input " ▶ 3. 접속 URL [$($assets[$origIdx].WebURL)]" -IsEditMode $true
                 if ($newURL) { $assets[$origIdx].WebURL = $newURL }
 
-                $newNote = Read-Input " ▶ 6. 비고 [$($assets[$origIdx].Note)]" -IsEditMode $true
+                $newNote = Read-Input " ▶ 4. 비고 [$($assets[$origIdx].Note)]" -IsEditMode $true
                 if ($newNote) { $assets[$origIdx].Note = $newNote }
 
                 Save-Assets -Assets $assets
-                Write-Host "`n [v] 자산 정보가 수정되었습니다." -ForegroundColor Green
+                Write-Host "`n [v] 자산 기본정보가 수정되었습니다." -ForegroundColor Green
+                Write-Host " [*] 계정(ID/PW) 수정을 원하시면 [2]번 조회 메뉴에서 해당 자산을 선택하세요." -ForegroundColor Yellow
                 $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
             } catch {
                 if ($_.Exception.Message -eq "CANCEL_ACTION") {
@@ -610,7 +917,7 @@ while ($true) {
             try {
                 Clear-Host
                 Show-Banner -Title "자 산 삭 제" -Color "Red"
-                Write-Host " [*] 검색 및 대상 선택 중 빈칸 Enter 또는 'q'를 입력하면 취소됩니다.`n" -ForegroundColor Gray
+                Write-Host " [*] 취소하려면 언제든 'q'를 입력하거나 빈칸에서 Enter를 누르세요.`n" -ForegroundColor Gray
                 
                 if ($assets.Count -eq 0) {
                     Write-Host " [!] 등록된 자산이 없습니다." -ForegroundColor Yellow
@@ -619,7 +926,6 @@ while ($true) {
                 }
                 
                 $keyword = Read-Input " ▶ 삭제할 자산을 검색하세요"
-
                 $results = @(Search-Assets -AllAssets $assets -Keyword $keyword)
                 if ($results.Count -eq 0) {
                     Write-Host " [!] 검색 결과가 없습니다." -ForegroundColor Yellow
@@ -628,7 +934,7 @@ while ($true) {
                 }
 
                 Write-Host "`n [ 검색 결과 ]" -ForegroundColor Green
-                Show-NumberedResults -Results $results
+                Show-AssetSummaryTable -AssetList $results
                 Write-Host ""
 
                 $selNum = Read-Input " ▶ 삭제할 자산의 번호를 입력하세요"
@@ -640,12 +946,12 @@ while ($true) {
                 }
 
                 $selected = $results[$selIdx]
-                Write-Host "`n [!] 삭제 대상: $($selected.AssetName) ($($selected.IP))" -ForegroundColor Yellow
-                $confirm = Read-Input " ▶ 정말 삭제하시겠습니까? (Y/N)" -AllowEmpty $true
+                Write-Host "`n [!] 삭제 대상: $($selected.AssetName) ($($selected.IP)) - 포함된 계정: $($selected.Accounts.Count)개" -ForegroundColor Yellow
+                $confirm = Read-Input " ▶ 해당 자산과 등록된 모든 계정을 완전히 삭제하시겠습니까? (Y/N)" -AllowEmpty $true
                 if ($confirm -match '^[Yy]$') {
-                    $assets = $assets | Where-Object { $_.AssetID -ne $selected.AssetID }
-                    Save-Assets -Assets @($assets)
-                    Write-Host "`n [v] 자산이 삭제되었습니다." -ForegroundColor Green
+                    $assets = @($assets | Where-Object { $_.AssetID -ne $selected.AssetID })
+                    Save-Assets -Assets $assets
+                    Write-Host "`n [v] 자산 및 하위 계정이 모두 삭제되었습니다." -ForegroundColor Green
                 } else {
                     Write-Host "`n [-] 삭제가 취소되었습니다." -ForegroundColor Yellow
                 }
