@@ -1,5 +1,5 @@
 # ==============================================================================
-# PowerShell 완전 보안 자산 관리자 (AES-256 + CLI/GUI 다중 계정 계층형 관리)
+# PowerShell 완전 보안 자산 관리자 (AES-256 + 동적 테이블 너비 자동 정렬)
 # ==============================================================================
 
 $DataFile = "$PSScriptRoot\SecureAssets.dat"
@@ -143,7 +143,6 @@ function Normalize-Asset {
             $accessType = if ($acc.PSObject.Properties['AccessType'] -and $acc.AccessType) { [string]$acc.AccessType } else { "CLI" }
             $accId = [string]$acc.ID
             
-            # GUI 계정은 역할 개념이 없으므로 "-"로 처리
             $role = "-"
             if ($accessType.ToUpper() -eq "CLI") {
                 if ($accId.ToLower() -eq "root" -or $accId.ToLower() -eq "administrator") {
@@ -466,19 +465,21 @@ function Change-MasterPasswordFlow {
     }
 }
 
-# 14. 전체/검색 자산 요약 목록 출력 함수 (CLI/GUI 구분 표시)
+# 14. 전체/검색 자산 요약 목록 출력 함수 (동적 컬럼 너비 계산 적용)
 function Show-AssetSummaryTable {
     param([array]$AssetList)
 
-    $hNo    = Pad-RightDisplay "번호" 6
-    $hName  = Pad-RightDisplay "자산명" 18
-    $hIP    = Pad-RightDisplay "IP주소" 18
-    $hAccs  = Pad-RightDisplay "등록 계정 요약" 26
-    $hURL   = Pad-RightDisplay "접속URL" 22
-    $hNote  = Pad-RightDisplay "비고" 18
+    if ($AssetList.Count -eq 0) { return }
 
-    Write-Host " $hNo $hName $hIP $hAccs $hURL $hNote" -ForegroundColor DarkGray
-    Write-Host " ────   ────────────────  ────────────────  ────────────────────────  ────────────────────  ────────────────" -ForegroundColor DarkGray
+    # 각 컬럼의 최소 보장 너비
+    $wNo   = 6   # "번호"
+    $wName = 8   # "자산명"
+    $wIP   = 8   # "IP주소"
+    $wAccs = 16  # "등록 계정 요약"
+    $wURL  = 10  # "접속URL"
+    $wNote = 6   # "비고"
+
+    $rows = @()
 
     for ($i = 0; $i -lt $AssetList.Count; $i++) {
         $a = $AssetList[$i]
@@ -499,20 +500,132 @@ function Show-AssetSummaryTable {
             $summaryParts += $guiStr
         }
 
-        $accSummary = if ($summaryParts.Count -gt 0) { $summaryParts -join " | " } else { "계정 없음 (0)" }
+        $accSummary = if ($summaryParts.Count -gt 0) { $summaryParts -join " | " } else { "계정 없음" }
+        $urlStr = if ($a.WebURL) { $a.WebURL } else { "-" }
+        $noteStr = if ($a.Note) { $a.Note } else { "-" }
 
-        $cNo   = Pad-RightDisplay $noStr 6
-        $cName = Pad-RightDisplay $a.AssetName 18
-        $cIP   = Pad-RightDisplay $a.IP 18
-        $cAccs = Pad-RightDisplay $accSummary 26
-        $cURL  = Pad-RightDisplay $a.WebURL 22
-        $cNote = Pad-RightDisplay $a.Note 18
+        $rowItem = [PSCustomObject]@{
+            NoStr      = $noStr
+            NameStr    = $a.AssetName
+            IPStr      = $a.IP
+            AccSummary = $accSummary
+            URLStr     = $urlStr
+            NoteStr    = $noteStr
+        }
+        $rows += $rowItem
+
+        # 최대 너비 계산 (데이터 너비 + 2 여백)
+        $wNo   = [Math]::Max($wNo, (Get-DisplayWidth $noStr) + 2)
+        $wName = [Math]::Max($wName, (Get-DisplayWidth $a.AssetName) + 2)
+        $wIP   = [Math]::Max($wIP, (Get-DisplayWidth $a.IP) + 2)
+        $wAccs = [Math]::Max($wAccs, (Get-DisplayWidth $accSummary) + 2)
+        $wURL  = [Math]::Max($wURL, (Get-DisplayWidth $urlStr) + 2)
+        $wNote = [Math]::Max($wNote, (Get-DisplayWidth $noteStr) + 2)
+    }
+
+    # 헤더 및 동적 구분선 생성
+    $hNo   = Pad-RightDisplay "번호" $wNo
+    $hName = Pad-RightDisplay "자산명" $wName
+    $hIP   = Pad-RightDisplay "IP주소" $wIP
+    $hAccs = Pad-RightDisplay "등록 계정 요약" $wAccs
+    $hURL  = Pad-RightDisplay "접속URL" $wURL
+    $hNote = Pad-RightDisplay "비고" $wNote
+
+    $sepNo   = "─" * ($wNo - 1)
+    $sepName = "─" * ($wName - 1)
+    $sepIP   = "─" * ($wIP - 1)
+    $sepAccs = "─" * ($wAccs - 1)
+    $sepURL  = "─" * ($wURL - 1)
+    $sepNote = "─" * ($wNote - 1)
+
+    Write-Host " $hNo $hName $hIP $hAccs $hURL $hNote" -ForegroundColor DarkGray
+    Write-Host " $sepNo $sepName $sepIP $sepAccs $sepURL $sepNote" -ForegroundColor DarkGray
+
+    # 데이터 행 출력
+    foreach ($r in $rows) {
+        $cNo   = Pad-RightDisplay $r.NoStr $wNo
+        $cName = Pad-RightDisplay $r.NameStr $wName
+        $cIP   = Pad-RightDisplay $r.IPStr $wIP
+        $cAccs = Pad-RightDisplay $r.AccSummary $wAccs
+        $cURL  = Pad-RightDisplay $r.URLStr $wURL
+        $cNote = Pad-RightDisplay $r.NoteStr $wNote
 
         Write-Host " $cNo $cName $cIP $cAccs $cURL $cNote" -ForegroundColor White
     }
 }
 
-# 15. 자산 검색 (다중 계정 ID/타입/접속유형/설명까지 검색)
+# 15. 계정 목록 테이블 동적 너비 출력 공통 헬퍼
+function Show-AccountListTable {
+    param([array]$Accounts)
+
+    if (-not $Accounts -or $Accounts.Count -eq 0) {
+        Write-Host "   (등록된 계정이 없습니다. [1]번을 눌러 새 계정을 추가하세요.)" -ForegroundColor Gray
+        return
+    }
+
+    $wNo   = 6   # "번호"
+    $wAcc  = 10  # "접근유형"
+    $wType = 12  # "구분/역할"
+    $wID   = 12  # "계정 ID"
+    $wPW   = 14  # "패스워드"
+    $wDesc = 14  # "계정 설명/메모"
+
+    $rows = @()
+    for ($i = 0; $i -lt $Accounts.Count; $i++) {
+        $acc = $Accounts[$i]
+        $noStr = ($i + 1).ToString()
+        $accTypeStr = if ($acc.AccessType) { "[$($acc.AccessType)]" } else { "[CLI]" }
+        $roleStr = if ($acc.AccessType.ToUpper() -eq "GUI") { "[-]" } elseif ($acc.AccountType -and $acc.AccountType -ne "-") { "[$($acc.AccountType)]" } else { "[-]" }
+        $pwStr = if ($acc.PW) { $acc.PW } else { "-" }
+        $descStr = if ($acc.Description) { $acc.Description } else { "-" }
+
+        $rows += [PSCustomObject]@{
+            NoStr   = $noStr
+            AccStr  = $accTypeStr
+            RoleStr = $roleStr
+            IDStr   = $acc.ID
+            PWStr   = $pwStr
+            DescStr = $descStr
+        }
+
+        $wNo   = [Math]::Max($wNo, (Get-DisplayWidth $noStr) + 2)
+        $wAcc  = [Math]::Max($wAcc, (Get-DisplayWidth $accTypeStr) + 2)
+        $wType = [Math]::Max($wType, (Get-DisplayWidth $roleStr) + 2)
+        $wID   = [Math]::Max($wID, (Get-DisplayWidth $acc.ID) + 2)
+        $wPW   = [Math]::Max($wPW, (Get-DisplayWidth $pwStr) + 2)
+        $wDesc = [Math]::Max($wDesc, (Get-DisplayWidth $descStr) + 2)
+    }
+
+    $hNo   = Pad-RightDisplay "번호" $wNo
+    $hAcc  = Pad-RightDisplay "접근유형" $wAcc
+    $hType = Pad-RightDisplay "구분/역할" $wType
+    $hID   = Pad-RightDisplay "계정 ID" $wID
+    $hPW   = Pad-RightDisplay "패스워드" $wPW
+    $hDesc = Pad-RightDisplay "계정 설명/메모" $wDesc
+
+    $sepNo   = "─" * ($wNo - 1)
+    $sepAcc  = "─" * ($wAcc - 1)
+    $sepType = "─" * ($wType - 1)
+    $sepID   = "─" * ($wID - 1)
+    $sepPW   = "─" * ($wPW - 1)
+    $sepDesc = "─" * ($wDesc - 1)
+
+    Write-Host "  $hNo $hAcc $hType $hID $hPW $hDesc" -ForegroundColor DarkGray
+    Write-Host "  $sepNo $sepAcc $sepType $sepID $sepPW $sepDesc" -ForegroundColor DarkGray
+
+    foreach ($r in $rows) {
+        $cNo   = Pad-RightDisplay $r.NoStr $wNo
+        $cAcc  = Pad-RightDisplay $r.AccStr $wAcc
+        $cType = Pad-RightDisplay $r.RoleStr $wType
+        $cID   = Pad-RightDisplay $r.IDStr $wID
+        $cPW   = Pad-RightDisplay $r.PWStr $wPW
+        $cDesc = Pad-RightDisplay $r.DescStr $wDesc
+
+        Write-Host "  $cNo $cAcc $cType $cID $cPW $cDesc" -ForegroundColor White
+    }
+}
+
+# 16. 자산 검색 (다중 계정 ID/타입/접속유형/설명까지 검색)
 function Search-Assets {
     param([array]$AllAssets, [string]$Keyword)
     $isIPLike = $Keyword -match '^[\d\.\:]+$'
@@ -543,7 +656,7 @@ function Search-Assets {
     return @($results)
 }
 
-# 16. 단일 계정 정보 입력 헬퍼 (CLI는 root/일반 관리, GUI는 역할 미사용)
+# 17. 단일 계정 정보 입력 헬퍼 (CLI는 root/일반 관리, GUI는 역할 미사용)
 function Read-NewAccountInput {
     param(
         [array]$ExistingAccounts,
@@ -628,7 +741,7 @@ function Read-NewAccountInput {
     }
 }
 
-# 17. 자산 상세 정보 및 하위 계정 관리 화면 (비밀번호 평문 완전 노출)
+# 18. 자산 상세 정보 및 하위 계정 관리 화면 (동적 너비 계정 테이블 출력)
 function Show-AssetDetailManage {
     param([string]$AssetID)
 
@@ -654,37 +767,8 @@ function Show-AssetDetailManage {
         $accList = @($targetAsset.Accounts)
         Write-Host " [ 등록된 계정 목록 (총 $($accList.Count)개) ]" -ForegroundColor Yellow
 
-        if ($accList.Count -eq 0) {
-            Write-Host "   (등록된 계정이 없습니다. [1]번을 눌러 새 계정을 추가하세요.)" -ForegroundColor Gray
-        } else {
-            $hNo    = Pad-RightDisplay "번호" 6
-            $hAcc   = Pad-RightDisplay "접근유형" 10
-            $hType  = Pad-RightDisplay "구분/역할" 12
-            $hID    = Pad-RightDisplay "계정 ID" 16
-            $hPW    = Pad-RightDisplay "패스워드" 20
-            $hDesc  = Pad-RightDisplay "계정 설명/메모" 20
-
-            Write-Host "  $hNo $hAcc $hType $hID $hPW $hDesc" -ForegroundColor DarkGray
-            Write-Host "  ────   ────────  ──────────  ──────────────  ──────────────────  ────────────────────" -ForegroundColor DarkGray
-
-            for ($i = 0; $i -lt $accList.Count; $i++) {
-                $acc = $accList[$i]
-                $noStr = ($i + 1).ToString()
-                $accTypeStr = if ($acc.AccessType) { "[$($acc.AccessType)]" } else { "[CLI]" }
-                
-                # GUI 계정은 역할이 없으므로 [-] 표시
-                $roleStr = if ($acc.AccessType.ToUpper() -eq "GUI") { "[-]" } elseif ($acc.AccountType -and $acc.AccountType -ne "-") { "[$($acc.AccountType)]" } else { "[-]" }
-
-                $cNo   = Pad-RightDisplay $noStr 6
-                $cAcc  = Pad-RightDisplay $accTypeStr 10
-                $cType = Pad-RightDisplay $roleStr 12
-                $cID   = Pad-RightDisplay $acc.ID 16
-                $cPW   = Pad-RightDisplay $acc.PW 20
-                $cDesc = Pad-RightDisplay $acc.Description 20
-
-                Write-Host "  $cNo $cAcc $cType $cID $cPW $cDesc" -ForegroundColor White
-            }
-        }
+        # 동적 너비 계정 목록 테이블 출력
+        Show-AccountListTable -Accounts $accList
 
         Write-Host "`n ───────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
         Write-Host "   [1] 새 계정 추가              [2] 계정 수정" -ForegroundColor White
@@ -891,11 +975,11 @@ function Show-AssetDetailManage {
 }
 
 # ─────────────────────────────────────────────────────────────
-# 18. 메인 프로그램 시작: 세션 인증
+# 19. 메인 프로그램 시작: 세션 인증
 # ─────────────────────────────────────────────────────────────
 Initialize-SessionAuth
 
-# 19. 메인 메뉴 루프
+# 20. 메인 메뉴 루프
 while ($true) {
     Clear-Host
     Show-Banner -Title "AssetManager" -Color "Cyan"
@@ -1076,7 +1160,7 @@ while ($true) {
                     # 추가 계정 연속 등록 여부
                     while ($true) {
                         $more = Read-Input "`n ▶ 이 자산에 계정을 더 추가하시겠습니까? (Y/N)" -AllowEmpty $true
-                        if ($more -match '^[Yy]$') {
+                        if ($more -notmatch '^[Yy]$') {
                             $nextAcc = Read-NewAccountInput -ExistingAccounts $newAccounts -HeaderMessage "추가 계정 정보 등록"
                             $newAccounts += $nextAcc
                         } else {
@@ -1213,31 +1297,8 @@ while ($true) {
                     Write-Host " [ 대상 자산: $($selected.AssetName) ($($selected.IP)) ]" -ForegroundColor Cyan
                     Write-Host " ───────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
                     
-                    $hNo    = Pad-RightDisplay "번호" 6
-                    $hAcc   = Pad-RightDisplay "접근유형" 10
-                    $hType  = Pad-RightDisplay "구분/역할" 12
-                    $hID    = Pad-RightDisplay "계정 ID" 16
-                    $hPW    = Pad-RightDisplay "패스워드" 20
-                    $hDesc  = Pad-RightDisplay "계정 설명/메모" 20
-
-                    Write-Host "  $hNo $hAcc $hType $hID $hPW $hDesc" -ForegroundColor DarkGray
-                    Write-Host "  ────   ────────  ──────────  ──────────────  ──────────────────  ────────────────────" -ForegroundColor DarkGray
-
-                    for ($i = 0; $i -lt $accList.Count; $i++) {
-                        $acc = $accList[$i]
-                        $noStr = ($i + 1).ToString()
-                        $accTypeStr = if ($acc.AccessType) { "[$($acc.AccessType)]" } else { "[CLI]" }
-                        $roleStr = if ($acc.AccessType.ToUpper() -eq "GUI") { "[-]" } elseif ($acc.AccountType -and $acc.AccountType -ne "-") { "[$($acc.AccountType)]" } else { "[-]" }
-
-                        $cNo   = Pad-RightDisplay $noStr 6
-                        $cAcc  = Pad-RightDisplay $accTypeStr 10
-                        $cType = Pad-RightDisplay $roleStr 12
-                        $cID   = Pad-RightDisplay $acc.ID 16
-                        $cPW   = Pad-RightDisplay $acc.PW 20
-                        $cDesc = Pad-RightDisplay $acc.Description 20
-
-                        Write-Host "  $cNo $cAcc $cType $cID $cPW $cDesc" -ForegroundColor White
-                    }
+                    # 동적 너비 계정 목록 테이블 출력
+                    Show-AccountListTable -Accounts $accList
 
                     Write-Host "`n ───────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
                     Write-Host "   [1] 특정 계정만 선택하여 삭제" -ForegroundColor Yellow
