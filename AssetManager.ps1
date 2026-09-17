@@ -1,5 +1,5 @@
 # ==============================================================================
-# PowerShell 완전 보안 자산 관리자 (AES-256 + 다중 계정 계층형 관리)
+# PowerShell 완전 보안 자산 관리자 (AES-256 + CLI/GUI 다중 계정 계층형 관리)
 # ==============================================================================
 
 $DataFile = "$PSScriptRoot\SecureAssets.dat"
@@ -40,7 +40,7 @@ function Encrypt-Aes256 {
     [System.Buffer]::BlockCopy($magic, 0, $result, 0, $magic.Length)
     [System.Buffer]::BlockCopy($salt, 0, $result, $magic.Length, $salt.Length)
     [System.Buffer]::BlockCopy($iv, 0, $result, $magic.Length + $salt.Length, $iv.Length)
-    [System.Buffer]::BlockCopy($cipherBytes, 0, $result, $magic.Length + $salt.Length, $iv.Length)
+    [System.Buffer]::BlockCopy($cipherBytes, 0, $result, $magic.Length + $salt.Length + $iv.Length, $cipherBytes.Length)
 
     return [System.Convert]::ToBase64String($result)
 }
@@ -125,20 +125,28 @@ function Read-MaskedInput {
     return $pwd
 }
 
-# 4. 데이터 정규화 함수 (단일 계정 -> 다중 계정 배열 호환)
+# 4. 데이터 정규화 함수 (CLI/GUI AccessType 속성 보장 및 하위 호환)
 function Normalize-Asset {
     param($raw)
     $accList = @()
     if ($raw.PSObject.Properties['Accounts'] -and $raw.Accounts) {
-        if ($raw.Accounts -is [array]) {
-            $accList = @($raw.Accounts)
-        } else {
-            $accList = @($raw.Accounts)
+        $rawAccounts = if ($raw.Accounts -is [array]) { @($raw.Accounts) } else { @($raw.Accounts) }
+        foreach ($acc in $rawAccounts) {
+            $accessType = if ($acc.PSObject.Properties['AccessType'] -and $acc.AccessType) { [string]$acc.AccessType } else { "CLI" }
+            $accList += [PSCustomObject]@{
+                AccountID   = if ($acc.AccountID) { [string]$acc.AccountID } else { [guid]::NewGuid().ToString() }
+                AccessType  = $accessType
+                AccountType = if ($acc.AccountType) { [string]$acc.AccountType } else { "일반" }
+                ID          = [string]$acc.ID
+                PW          = [string]$acc.PW
+                Description = if ($acc.Description) { [string]$acc.Description } else { "" }
+            }
         }
     } elseif ($raw.PSObject.Properties['ID'] -or $raw.PSObject.Properties['PW']) {
         if ($raw.ID -or $raw.PW) {
             $accList += [PSCustomObject]@{
                 AccountID   = [guid]::NewGuid().ToString()
+                AccessType  = "CLI"
                 AccountType = "기본"
                 ID          = [string]$raw.ID
                 PW          = [string]$raw.PW
@@ -190,29 +198,37 @@ function Save-Assets {
     [System.IO.File]::WriteAllText($DataFile, $EncryptedText, [System.Text.UTF8Encoding]::new($false))
 }
 
-# 7. 계정 중복 검사 함수 (동일 ID 중복 방지)
+# 7. 동일 AccessType(CLI/GUI) 내 계정 ID 중복 검사 함수
 function Test-AccountExists {
     param(
         [array]$Accounts,
+        [string]$AccessType,
         [string]$CheckID
     )
     if (-not $Accounts -or $Accounts.Count -eq 0) { return $false }
     $normCheck = $CheckID.Trim().ToLower()
+    $normAccess = $AccessType.Trim().ToUpper()
     foreach ($acc in $Accounts) {
-        if ($acc.ID.Trim().ToLower() -eq $normCheck) {
+        if ($acc.AccessType.ToUpper() -eq $normAccess -and $acc.ID.Trim().ToLower() -eq $normCheck) {
             return $true
         }
     }
     return $false
 }
 
-# 8. root 계정 보유 여부 검사 함수
+# 8. 동일 AccessType(CLI/GUI) 내 root 계정 존재 여부 검사 함수
 function Test-HasRootAccount {
-    param([array]$Accounts)
+    param(
+        [array]$Accounts,
+        [string]$AccessType
+    )
     if (-not $Accounts -or $Accounts.Count -eq 0) { return $false }
+    $normAccess = $AccessType.Trim().ToUpper()
     foreach ($acc in $Accounts) {
-        if ($acc.ID.Trim().ToLower() -eq "root" -or $acc.AccountType.Trim().ToLower() -eq "root") {
-            return $true
+        if ($acc.AccessType.ToUpper() -eq $normAccess) {
+            if ($acc.ID.Trim().ToLower() -eq "root" -or $acc.AccountType.Trim().ToLower() -eq "root") {
+                return $true
+            }
         }
     }
     return $false
@@ -430,48 +446,53 @@ function Change-MasterPasswordFlow {
     }
 }
 
-# 14. 전체/검색 자산 요약 목록 출력 함수
+# 14. 전체/검색 자산 요약 목록 출력 함수 (CLI/GUI 구분 표시)
 function Show-AssetSummaryTable {
     param([array]$AssetList)
 
     $hNo    = Pad-RightDisplay "번호" 6
     $hName  = Pad-RightDisplay "자산명" 18
     $hIP    = Pad-RightDisplay "IP주소" 18
-    $hAccs  = Pad-RightDisplay "등록계정(수)" 20
-    $hURL   = Pad-RightDisplay "접속URL" 24
+    $hAccs  = Pad-RightDisplay "등록 계정 요약" 26
+    $hURL   = Pad-RightDisplay "접속URL" 22
     $hNote  = Pad-RightDisplay "비고" 18
 
     Write-Host " $hNo $hName $hIP $hAccs $hURL $hNote" -ForegroundColor DarkGray
-    Write-Host " ────   ────────────────  ────────────────  ──────────────────  ──────────────────────  ────────────────" -ForegroundColor DarkGray
+    Write-Host " ────   ────────────────  ────────────────  ────────────────────────  ────────────────────  ────────────────" -ForegroundColor DarkGray
 
     for ($i = 0; $i -lt $AssetList.Count; $i++) {
         $a = $AssetList[$i]
         $noStr = ($i + 1).ToString()
 
-        $accCount = if ($a.Accounts) { $a.Accounts.Count } else { 0 }
-        $accSummary = "계정 없음 (0)"
-        if ($accCount -eq 1) {
-            $first = $a.Accounts[0]
-            $typeStr = if ($first.AccountType) { "[$($first.AccountType)] " } else { "" }
-            $accSummary = "$typeStr$($first.ID)"
-        } elseif ($accCount -gt 1) {
-            $first = $a.Accounts[0]
-            $typeStr = if ($first.AccountType) { "[$($first.AccountType)] " } else { "" }
-            $accSummary = "$typeStr$($first.ID) 외 $($accCount - 1)개"
+        $cliAccs = @($a.Accounts | Where-Object { $_.AccessType -eq "CLI" })
+        $guiAccs = @($a.Accounts | Where-Object { $_.AccessType -eq "GUI" })
+
+        $summaryParts = @()
+        if ($cliAccs.Count -gt 0) {
+            $first = $cliAccs[0].ID
+            $cliStr = if ($cliAccs.Count -eq 1) { "CLI:$first" } else { "CLI:$first 외 $($cliAccs.Count - 1)" }
+            $summaryParts += $cliStr
         }
+        if ($guiAccs.Count -gt 0) {
+            $first = $guiAccs[0].ID
+            $guiStr = if ($guiAccs.Count -eq 1) { "GUI:$first" } else { "GUI:$first 외 $($guiAccs.Count - 1)" }
+            $summaryParts += $guiStr
+        }
+
+        $accSummary = if ($summaryParts.Count -gt 0) { $summaryParts -join " | " } else { "계정 없음 (0)" }
 
         $cNo   = Pad-RightDisplay $noStr 6
         $cName = Pad-RightDisplay $a.AssetName 18
         $cIP   = Pad-RightDisplay $a.IP 18
-        $cAccs = Pad-RightDisplay $accSummary 20
-        $cURL  = Pad-RightDisplay $a.WebURL 24
+        $cAccs = Pad-RightDisplay $accSummary 26
+        $cURL  = Pad-RightDisplay $a.WebURL 22
         $cNote = Pad-RightDisplay $a.Note 18
 
         Write-Host " $cNo $cName $cIP $cAccs $cURL $cNote" -ForegroundColor White
     }
 }
 
-# 15. 자산 검색 (다중 계정 ID/타입/설명까지 검색)
+# 15. 자산 검색 (다중 계정 ID/타입/접속유형/설명까지 검색)
 function Search-Assets {
     param([array]$AllAssets, [string]$Keyword)
     $isIPLike = $Keyword -match '^[\d\.\:]+$'
@@ -485,7 +506,11 @@ function Search-Assets {
             $foundInAcc = $false
             if ($_.Accounts) {
                 foreach ($acc in $_.Accounts) {
-                    if ($acc.ID -like "*$Keyword*" -or $acc.AccountType -like "*$Keyword*" -or $acc.Description -like "*$Keyword*" -or $acc.PW -like "*$Keyword*") {
+                    if ($acc.ID -like "*$Keyword*" -or 
+                        $acc.AccountType -like "*$Keyword*" -or 
+                        $acc.AccessType -like "*$Keyword*" -or 
+                        $acc.Description -like "*$Keyword*" -or 
+                        $acc.PW -like "*$Keyword*") {
                         $foundInAcc = $true
                         break
                     }
@@ -498,7 +523,7 @@ function Search-Assets {
     return @($results)
 }
 
-# 16. 단일 계정 정보 입력 헬퍼 (root 자동 판별 및 중복 방지)
+# 16. 단일 계정 정보 입력 헬퍼 (CLI/GUI 선택 + root 자동 판별)
 function Read-NewAccountInput {
     param(
         [array]$ExistingAccounts,
@@ -506,60 +531,69 @@ function Read-NewAccountInput {
     )
     Write-Host "`n [ $HeaderMessage ] ('q' 입력 시 취소)" -ForegroundColor Cyan
     
-    $hasRoot = Test-HasRootAccount -Accounts $ExistingAccounts
+    # 1. 접속 유형 선택 (CLI vs GUI)
+    Write-Host " ▶ 접속 유형을 선택하세요:" -ForegroundColor White
+    Write-Host "   [1] CLI (SSH/Telnet/콘솔)" -ForegroundColor DarkGray
+    Write-Host "   [2] GUI (웹콘솔/RDP/윈도우원격)" -ForegroundColor DarkGray
+    $typeChoice = (Read-Host "   번호 선택 (기본값: 1)").Trim()
+    
+    $accessType = "CLI"
+    if ($typeChoice -eq '2' -or $typeChoice.ToLower() -eq 'gui') {
+        $accessType = "GUI"
+    }
 
-    # 계정 ID 입력 및 중복 체크 루프
+    $hasRoot = Test-HasRootAccount -Accounts $ExistingAccounts -AccessType $accessType
+
+    # 2. 계정 ID 입력 및 중복 체크 루프
     $accID = ""
     while ($true) {
         $accID = Read-Input " ▶ 계정 ID"
         
         if ($accID.ToLower() -eq "root" -and $hasRoot) {
-            Write-Host " [!] 이미 root 계정이 등록되어 있어 root는 추가할 수 없습니다.`n" -ForegroundColor Red
+            Write-Host " [!] [$accessType]에 이미 root 계정이 등록되어 있어 root는 추가할 수 없습니다.`n" -ForegroundColor Red
             continue
         }
         
-        if (Test-AccountExists -Accounts $ExistingAccounts -CheckID $accID) {
-            Write-Host " [!] 이미 '$accID' 계정이 등록되어 있습니다. 다른 ID를 입력하세요.`n" -ForegroundColor Red
+        if (Test-AccountExists -Accounts $ExistingAccounts -AccessType $accessType -CheckID $accID) {
+            Write-Host " [!] [$accessType]에 이미 '$accID' 계정이 등록되어 있습니다. 다른 ID를 입력하세요.`n" -ForegroundColor Red
             continue
         }
         break
     }
 
-    # 계정 구분/역할(Role) 결정
-    $accType = ""
+    # 3. 계정 구분/역할(Role) 결정
+    $accRole = ""
     if ($accID.ToLower() -eq "root") {
-        $accType = "root"
+        $accRole = "root"
     } elseif ($hasRoot) {
-        # 이미 root가 있는 경우 자동으로 '일반' 배정 (입력 생략)
-        $accType = "일반"
-        Write-Host " [*] 이미 root 계정이 존재하여 계정 역할이 자동으로 '일반'으로 지정됩니다." -ForegroundColor DarkGray
+        $accRole = "일반"
+        Write-Host " [*] [$accessType]에 이미 root가 존재하여 계정 역할이 자동으로 '일반'으로 지정됩니다." -ForegroundColor DarkGray
     } else {
-        # root가 아직 없는 경우에만 역할을 물어봄
-        $inType = Read-Input " ▶ 계정 구분/역할" -AllowEmpty $true
-        if ([string]::IsNullOrWhiteSpace($inType)) {
-            $accType = "일반"
+        $inRole = Read-Input " ▶ 계정 구분/역할" -AllowEmpty $true
+        if ([string]::IsNullOrWhiteSpace($inRole)) {
+            $accRole = "일반"
         } else {
-            $accType = $inType
+            $accRole = $inRole
         }
     }
 
+    # 4. 패스워드 및 설명 입력 (패스워드는 화면에 일반 입력 또는 마스킹 선택 가능하나 입력 후 평문 보관)
     $accPW   = Read-Input " ▶ 패스워드"
     $accDesc = Read-Input " ▶ 계정 설명/메모" -AllowEmpty $true
 
     return [PSCustomObject]@{
         AccountID   = [guid]::NewGuid().ToString()
-        AccountType = $accType
+        AccessType  = $accessType
+        AccountType = $accRole
         ID          = $accID
         PW          = $accPW
         Description = $accDesc
     }
 }
 
-# 17. 자산 상세 정보 및 하위 계정 관리 화면
+# 17. 자산 상세 정보 및 하위 계정 관리 화면 (비밀번호 평문 완전 노출)
 function Show-AssetDetailManage {
     param([string]$AssetID)
-
-    $showPasswords = $false
 
     while ($true) {
         $allAssets = @(Get-Assets)
@@ -587,35 +621,35 @@ function Show-AssetDetailManage {
             Write-Host "   (등록된 계정이 없습니다. [1]번을 눌러 새 계정을 추가하세요.)" -ForegroundColor Gray
         } else {
             $hNo    = Pad-RightDisplay "번호" 6
-            $hType  = Pad-RightDisplay "구분/역할" 14
+            $hAcc   = Pad-RightDisplay "접근유형" 10
+            $hType  = Pad-RightDisplay "구분/역할" 12
             $hID    = Pad-RightDisplay "계정 ID" 16
-            $hPW    = Pad-RightDisplay "패스워드" 18
+            $hPW    = Pad-RightDisplay "패스워드" 20
             $hDesc  = Pad-RightDisplay "계정 설명/메모" 20
 
-            Write-Host "  $hNo $hType $hID $hPW $hDesc" -ForegroundColor DarkGray
-            Write-Host "  ────   ────────────  ──────────────  ────────────────  ────────────────────" -ForegroundColor DarkGray
+            Write-Host "  $hNo $hAcc $hType $hID $hPW $hDesc" -ForegroundColor DarkGray
+            Write-Host "  ────   ────────  ──────────  ──────────────  ──────────────────  ────────────────────" -ForegroundColor DarkGray
 
             for ($i = 0; $i -lt $accList.Count; $i++) {
                 $acc = $accList[$i]
                 $noStr = ($i + 1).ToString()
-                $typeStr = if ($acc.AccountType) { "[$($acc.AccountType)]" } else { "[-]" }
-                $pwStr = if ($showPasswords) { $acc.PW } else { "********" }
+                $accTypeStr = if ($acc.AccessType) { "[$($acc.AccessType)]" } else { "[CLI]" }
+                $roleStr = if ($acc.AccountType) { "[$($acc.AccountType)]" } else { "[-]" }
 
                 $cNo   = Pad-RightDisplay $noStr 6
-                $cType = Pad-RightDisplay $typeStr 14
+                $cAcc  = Pad-RightDisplay $accTypeStr 10
+                $cType = Pad-RightDisplay $roleStr 12
                 $cID   = Pad-RightDisplay $acc.ID 16
-                $cPW   = Pad-RightDisplay $pwStr 18
+                $cPW   = Pad-RightDisplay $acc.PW 20
                 $cDesc = Pad-RightDisplay $acc.Description 20
 
-                Write-Host "  $cNo $cType $cID $cPW $cDesc" -ForegroundColor White
+                Write-Host "  $cNo $cAcc $cType $cID $cPW $cDesc" -ForegroundColor White
             }
         }
 
         Write-Host "`n ───────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
-        $pwToggleLabel = if ($showPasswords) { "비밀번호 가리기 (숨김)" } else { "비밀번호 보기 (표시)" }
         Write-Host "   [1] 새 계정 추가              [2] 계정 수정" -ForegroundColor White
-        Write-Host "   [3] 계정 삭제                 [4] $pwToggleLabel" -ForegroundColor White
-        Write-Host "   [0] 이전 화면으로 돌아가기" -ForegroundColor DarkGray
+        Write-Host "   [3] 계정 삭제                 [0] 이전 화면으로 돌아가기" -ForegroundColor White
         Write-Host " ───────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
 
         while ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null }
@@ -664,28 +698,34 @@ function Show-AssetDetailManage {
                     $targetAcc = $accList[$idx]
                     Write-Host "`n [*] 수정할 값을 입력하세요. (기존 유지 시 Enter, 취소 시 q)" -ForegroundColor Cyan
                     
+                    $uAccess = Read-Input " ▶ 접속 유형 [CLI/GUI] [$($targetAcc.AccessType)]" -IsEditMode $true
+                    $finalAccess = if ($uAccess) { $uAccess.ToUpper() } else { $targetAcc.AccessType }
+
                     $uID = Read-Input " ▶ 계정 ID [$($targetAcc.ID)]" -IsEditMode $true
-                    if ($uID -and $uID.ToLower() -ne $targetAcc.ID.ToLower()) {
+                    $finalID = if ($uID) { $uID } else { $targetAcc.ID }
+
+                    if ($uID -or $uAccess) {
                         $otherAccounts = @($targetAsset.Accounts | Where-Object { $_.AccountID -ne $targetAcc.AccountID })
-                        if (Test-AccountExists -Accounts $otherAccounts -CheckID $uID) {
-                            Write-Host "`n [!] 이미 '$uID' 계정이 등록되어 있어 해당 ID로 변경할 수 없습니다." -ForegroundColor Red
+                        if (Test-AccountExists -Accounts $otherAccounts -AccessType $finalAccess -CheckID $finalID) {
+                            Write-Host "`n [!] [$finalAccess]에 이미 '$finalID' 계정이 등록되어 있어 변경할 수 없습니다." -ForegroundColor Red
                             Start-Sleep -Seconds 1
                             break
                         }
                     }
 
-                    $uType = Read-Input " ▶ 계정 구분/역할 [$($targetAcc.AccountType)]" -IsEditMode $true
-                    $uPW   = Read-Input " ▶ 패스워드 [********]" -IsEditMode $true
+                    $uRole = Read-Input " ▶ 계정 구분/역할 [$($targetAcc.AccountType)]" -IsEditMode $true
+                    $uPW   = Read-Input " ▶ 패스워드 [$($targetAcc.PW)]" -IsEditMode $true
                     $uDesc = Read-Input " ▶ 계정 설명/메모 [$($targetAcc.Description)]" -IsEditMode $true
 
                     for ($i = 0; $i -lt $allAssets.Count; $i++) {
                         if ($allAssets[$i].AssetID -eq $AssetID) {
                             for ($j = 0; $j -lt $allAssets[$i].Accounts.Count; $j++) {
                                 if ($allAssets[$i].Accounts[$j].AccountID -eq $targetAcc.AccountID) {
-                                    if ($uID)   { $allAssets[$i].Accounts[$j].ID = $uID }
-                                    if ($uType) { $allAssets[$i].Accounts[$j].AccountType = $uType }
-                                    if ($uPW)   { $allAssets[$i].Accounts[$j].PW = $uPW }
-                                    if ($uDesc) { $allAssets[$i].Accounts[$j].Description = $uDesc }
+                                    if ($uAccess) { $allAssets[$i].Accounts[$j].AccessType = $finalAccess }
+                                    if ($uID)     { $allAssets[$i].Accounts[$j].ID = $finalID }
+                                    if ($uRole)   { $allAssets[$i].Accounts[$j].AccountType = $uRole }
+                                    if ($uPW)     { $allAssets[$i].Accounts[$j].PW = $uPW }
+                                    if ($uDesc)   { $allAssets[$i].Accounts[$j].Description = $uDesc }
                                     break
                                 }
                             }
@@ -720,7 +760,7 @@ function Show-AssetDetailManage {
                     }
 
                     $targetAcc = $accList[$idx]
-                    $confirm = Read-Input " ▶ '[$($targetAcc.AccountType)] $($targetAcc.ID)' 계정을 삭제하시겠습니까? (Y/N)" -AllowEmpty $true
+                    $confirm = Read-Input " ▶ '[$($targetAcc.AccessType)][$($targetAcc.AccountType)] $($targetAcc.ID)' 계정을 삭제하시겠습니까? (Y/N)" -AllowEmpty $true
                     if ($confirm -match '^[Yy]$') {
                         for ($i = 0; $i -lt $allAssets.Count; $i++) {
                             if ($allAssets[$i].AssetID -eq $AssetID) {
@@ -738,11 +778,6 @@ function Show-AssetDetailManage {
                         Start-Sleep -Milliseconds 600
                     } else { throw $_ }
                 }
-            }
-
-            # ── 4. 비밀번호 토글 ──
-            '4' {
-                $showPasswords = -not $showPasswords
             }
 
             # ── 0. 뒤로가기 ──
@@ -872,7 +907,7 @@ while ($true) {
                     if ($currAccounts.Count -eq 0) {
                         $accSummaryStr = "등록된 계정 없음"
                     } else {
-                        $accNames = $currAccounts | ForEach-Object { "$($_.ID)($($_.AccountType))" }
+                        $accNames = $currAccounts | ForEach-Object { "$($_.AccessType):$($_.ID)($($_.AccountType))" }
                         $accSummaryStr = $accNames -join ", "
                     }
                     Write-Host "  * 현재 등록된 계정 ($($currAccounts.Count)개): $accSummaryStr" -ForegroundColor Yellow
@@ -916,7 +951,7 @@ while ($true) {
                         }
                         $addedCount++
                         Save-Assets -Assets $assets
-                        Write-Host "`n [v] '$($newAcc.ID)' 계정이 성공적으로 추가되었습니다!" -ForegroundColor Green
+                        Write-Host "`n [v] [$($newAcc.AccessType)] '$($newAcc.ID)' 계정이 성공적으로 추가되었습니다!" -ForegroundColor Green
 
                         $more = Read-Input "`n ▶ 이 자산에 계정을 더 추가하시겠습니까? (Y/N)" -AllowEmpty $true
                         if ($more -notmatch '^[Yy]$') {
