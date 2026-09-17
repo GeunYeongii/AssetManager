@@ -1,19 +1,94 @@
-# ==========================================
-# PowerShell 보안 자산 관리자 (JSON + DPAPI + 마스터 비밀번호 인증)
-# ==========================================
+# ==============================================================================
+# PowerShell 완전 보안 자산 관리자 (AES-256 + PBKDF2 Zero-Knowledge 암호화)
+# ==============================================================================
 
 $DataFile = "$PSScriptRoot\SecureAssets.dat"
-$AuthFile = "$PSScriptRoot\SecureAuth.dat"
+$Global:SessionPassword = $null
 
-# 1. 데이터 암호화 함수 (DPAPI)
-function Protect-Data {
-    param([string]$PlainText)
-    $Secure = ConvertTo-SecureString -String $PlainText -AsPlainText -Force
-    ConvertFrom-SecureString -SecureString $Secure
+# 1. AES-256 + PBKDF2 (SHA-256, 50,000 Rounds) 암호화 함수
+function Encrypt-Aes256 {
+    param(
+        [string]$PlainText,
+        [string]$Password
+    )
+    $salt = New-Object byte[] 16
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $rng.GetBytes($salt)
+
+    $iv = New-Object byte[] 16
+    $rng.GetBytes($iv)
+
+    # PBKDF2 키 유도 (50,000회 반복, SHA-256)
+    $deriveBytes = New-Object System.Security.Cryptography.Rfc2898DeriveBytes($Password, $salt, 50000, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    $key = $deriveBytes.GetBytes(32) # 256-bit
+
+    $aes = [System.Security.Cryptography.Aes]::Create()
+    $aes.KeySize = 256
+    $aes.BlockSize = 128
+    $aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
+    $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+    $aes.Key = $key
+    $aes.IV = $iv
+
+    $encryptor = $aes.CreateEncryptor()
+    $plainBytes = [System.Text.Encoding]::UTF8.GetBytes($PlainText)
+    $cipherBytes = $encryptor.TransformFinalBlock($plainBytes, 0, $plainBytes.Length)
+
+    # 헤더: "SAM1" (4B) + Salt (16B) + IV (16B) + CipherData
+    $magic = [System.Text.Encoding]::ASCII.GetBytes("SAM1")
+    $result = New-Object byte[] ($magic.Length + $salt.Length + $iv.Length + $cipherBytes.Length)
+    [System.Buffer]::BlockCopy($magic, 0, $result, 0, $magic.Length)
+    [System.Buffer]::BlockCopy($salt, 0, $result, $magic.Length, $salt.Length)
+    [System.Buffer]::BlockCopy($iv, 0, $result, $magic.Length + $salt.Length, $iv.Length)
+    [System.Buffer]::BlockCopy($cipherBytes, 0, $result, $magic.Length + $salt.Length + $iv.Length, $cipherBytes.Length)
+
+    return [System.Convert]::ToBase64String($result)
 }
 
-# 2. 데이터 복호화 함수 (DPAPI)
-function Unprotect-Data {
+# 2. AES-256 복호화 함수
+function Decrypt-Aes256 {
+    param(
+        [string]$EncryptedBase64,
+        [string]$Password
+    )
+    $rawBytes = [System.Convert]::FromBase64String($EncryptedBase64)
+    if ($rawBytes.Length -lt 36) {
+        throw [System.Security.Cryptography.CryptographicException]::new("유효하지 않은 데이터 포맷입니다.")
+    }
+
+    $magic = [System.Text.Encoding]::ASCII.GetString($rawBytes, 0, 4)
+    if ($magic -ne "SAM1") {
+        throw [System.Security.Cryptography.CryptographicException]::new("지원되지 않거나 손상된 암호화 데이터입니다.")
+    }
+
+    $salt = New-Object byte[] 16
+    [System.Buffer]::BlockCopy($rawBytes, 4, $salt, 0, 16)
+
+    $iv = New-Object byte[] 16
+    [System.Buffer]::BlockCopy($rawBytes, 20, $iv, 0, 16)
+
+    $cipherLength = $rawBytes.Length - 36
+    $cipherBytes = New-Object byte[] $cipherLength
+    [System.Buffer]::BlockCopy($rawBytes, 36, $cipherBytes, 0, $cipherLength)
+
+    $deriveBytes = New-Object System.Security.Cryptography.Rfc2898DeriveBytes($Password, $salt, 50000, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    $key = $deriveBytes.GetBytes(32)
+
+    $aes = [System.Security.Cryptography.Aes]::Create()
+    $aes.KeySize = 256
+    $aes.BlockSize = 128
+    $aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
+    $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+    $aes.Key = $key
+    $aes.IV = $iv
+
+    $decryptor = $aes.CreateDecryptor()
+    $plainBytes = $decryptor.TransformFinalBlock($cipherBytes, 0, $cipherBytes.Length)
+    return [System.Text.Encoding]::UTF8.GetString($plainBytes)
+}
+
+# 레거시 DPAPI 복호화 보조 함수 (최초 1회 마이그레이션용)
+function Unprotect-LegacyDpapi {
     param([string]$EncryptedText)
     $Secure = ConvertTo-SecureString -String $EncryptedText
     $Ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToGlobalAllocUnicode($Secure)
@@ -50,45 +125,89 @@ function Read-MaskedInput {
     return $pwd
 }
 
-# 4. SHA-256 + Salt 해시 생성
-function Get-PasswordHash {
-    param([string]$Password, [string]$Salt)
-    $hasher = [System.Security.Cryptography.SHA256]::Create()
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Password + $Salt)
-    $hashBytes = $hasher.ComputeHash($bytes)
-    return [System.Convert]::ToBase64String($hashBytes)
-}
-
-# 5. 마스터 비밀번호 저장 함수
-function Set-MasterPassword {
-    param([string]$NewPassword)
-    $salt = [System.Guid]::NewGuid().ToString("N")
-    $hash = Get-PasswordHash -Password $NewPassword -Salt $salt
-    $authObj = @{
-        Salt = $salt
-        Hash = $hash
+# 4. 자산 불러오기 (AES-256)
+function Get-Assets {
+    if (-not (Test-Path $DataFile)) { return @() }
+    try {
+        $EncryptedText = (Get-Content $DataFile -Raw).Trim()
+        if ([string]::IsNullOrWhiteSpace($EncryptedText)) { return @() }
+        $PlainText = Decrypt-Aes256 -EncryptedBase64 $EncryptedText -Password $Global:SessionPassword
+        $result = $PlainText | ConvertFrom-Json
+        if ($result -isnot [array]) {
+            return @($result)
+        }
+        return $result
+    } catch {
+        Write-Warning "자산 데이터 복호화 실패: $($_.Exception.Message)"
+        return @()
     }
-    $authJson = ConvertTo-Json -InputObject $authObj -Compress
-    $encryptedAuth = Protect-Data -PlainText $authJson
-    [System.IO.File]::WriteAllText($AuthFile, $encryptedAuth, [System.Text.UTF8Encoding]::new($false))
 }
 
-# 6. 마스터 비밀번호 검증 및 초기 설정 절차
-function Assert-MasterPassword {
+# 5. 자산 저장하기 (AES-256)
+function Save-Assets {
+    param([array]$Assets)
+    if ($Assets.Count -eq 0) {
+        $JsonText = '[]'
+    } else {
+        $JsonText = ConvertTo-Json -InputObject @($Assets) -Depth 3 -Compress
+    }
+    $EncryptedText = Encrypt-Aes256 -PlainText $JsonText -Password $Global:SessionPassword
+    [System.IO.File]::WriteAllText($DataFile, $EncryptedText, [System.Text.UTF8Encoding]::new($false))
+}
+
+# 6. 프로그램 실행 시 마스터 비밀번호 인증 / 초기화 / 마이그레이션
+function Initialize-SessionAuth {
     Clear-Host
-    # 인증 파일이 없는 경우 -> 최초 설정
-    if (-not (Test-Path $AuthFile)) {
-        Show-Banner -Title "마스터 비밀번호 신규 설정" -Color "Yellow"
-        Write-Host " [!] 최초 실행입니다. 프로그램 보호를 위한 마스터 비밀번호를 설정하세요.`n" -ForegroundColor Yellow
+
+    # 데이터 파일이 존재하고 레거시 DPAPI 포맷인지 확인
+    $needsMigration = $false
+    $migratedAssets = @()
+
+    if (Test-Path $DataFile) {
+        $rawContent = (Get-Content $DataFile -Raw).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($rawContent)) {
+            $isAesFormat = $false
+            try {
+                $testBytes = [System.Convert]::FromBase64String($rawContent)
+                if ($testBytes.Length -ge 4) {
+                    $magic = [System.Text.Encoding]::ASCII.GetString($testBytes, 0, 4)
+                    if ($magic -eq "SAM1") { $isAesFormat = $true }
+                }
+            } catch { $isAesFormat = $false }
+
+            # AES 포맷이 아닌 경우 기존 DPAPI 복호화 시도
+            if (-not $isAesFormat) {
+                try {
+                    $legacyPlain = Unprotect-LegacyDpapi -EncryptedText $rawContent
+                    $parsed = $legacyPlain | ConvertFrom-Json
+                    if ($parsed -is [array]) { $migratedAssets = @($parsed) } else { $migratedAssets = @($parsed) }
+                    $needsMigration = $true
+                } catch {
+                    $needsMigration = $false
+                }
+            }
+        }
+    }
+
+    # 데이터 파일이 없거나 레거시 마이그레이션이 필요한 경우
+    if ((-not (Test-Path $DataFile)) -or $needsMigration) {
+        Show-Banner -Title "AES-256 보안 자산 관리자 초기 설정" -Color "Yellow"
+        if ($needsMigration) {
+            Write-Host " [*] 기존 자산 데이터($($migratedAssets.Count)건)를 감지했습니다." -ForegroundColor Green
+            Write-Host " [*] 데이터를 보호할 새로운 '마스터 비밀번호'를 설정하시면 AES-256으로 자동 변환됩니다." -ForegroundColor Yellow
+        } else {
+            Write-Host " [!] 최초 실행입니다. 자산 데이터를 암호화할 '마스터 비밀번호'를 설정하세요." -ForegroundColor Yellow
+        }
+        Write-Host " [★] 중요: 비밀번호를 분실하면 어떤 방법으로도 데이터를 절대 복구할 수 없습니다!`n" -ForegroundColor Red
         
         while ($true) {
-            $pwd1 = Read-MaskedInput -PromptText " ▶ 새 마스터 비밀번호 입력"
+            $pwd1 = Read-MaskedInput -PromptText " ▶ 마스터 비밀번호 설정 (최소 6자리)"
             if ([string]::IsNullOrWhiteSpace($pwd1)) {
                 Write-Host " [!] 비밀번호는 공백일 수 없습니다.`n" -ForegroundColor Red
                 continue
             }
-            if ($pwd1.Length -lt 4) {
-                Write-Host " [!] 비밀번호는 최소 4자리 이상이어야 합니다.`n" -ForegroundColor Red
+            if ($pwd1.Length -lt 6) {
+                Write-Host " [!] 보안을 위해 비밀번호는 최소 6자리 이상이어야 합니다.`n" -ForegroundColor Red
                 continue
             }
             
@@ -98,32 +217,24 @@ function Assert-MasterPassword {
                 continue
             }
             
-            Set-MasterPassword -NewPassword $pwd1
-            Write-Host "`n [v] 마스터 비밀번호가 안전하게 설정되었습니다!" -ForegroundColor Green
+            $Global:SessionPassword = $pwd1
+            Save-Assets -Assets $migratedAssets
+            Write-Host "`n [v] AES-256 보안 저장소가 안전하게 설정되었습니다!" -ForegroundColor Green
             Start-Sleep -Seconds 1
             break
         }
         return
     }
 
-    # 인증 파일이 있는 경우 -> 비밀번호 검증
-    try {
-        $encryptedAuth = (Get-Content $AuthFile -Raw).Trim()
-        $authJson = Unprotect-Data -EncryptedText $encryptedAuth
-        $authObj = $authJson | ConvertFrom-Json
-    } catch {
-        Write-Host "`n [!] 인증 데이터 복호화 실패. 현재 Windows 계정과 일치하는지 확인하세요." -ForegroundColor Red
-        $null = Read-Host "`n 아무 키나 누르면 종료됩니다..."
-        exit
-    }
-
+    # 기존 AES 데이터 파일이 있는 경우 -> 비밀번호로 복호화 검증
+    $encryptedContent = (Get-Content $DataFile -Raw).Trim()
     $maxAttempts = 5
     $attempts = 0
 
     while ($attempts -lt $maxAttempts) {
         Clear-Host
-        Show-Banner -Title "보 안 인 증 (MASTER AUTH)" -Color "Cyan"
-        Write-Host " 🔐 자산 관리자에 접근하려면 마스터 비밀번호를 입력해주세요.`n" -ForegroundColor White
+        Show-Banner -Title "AES-256 MASTER AUTHENTICATION" -Color "Cyan"
+        Write-Host " 🔐 자산 데이터를 복호화하려면 마스터 비밀번호를 입력하세요.`n" -ForegroundColor White
         
         $inputPwd = Read-MaskedInput -PromptText " ▶ 마스터 비밀번호"
         
@@ -133,15 +244,17 @@ function Assert-MasterPassword {
             continue
         }
 
-        $calcHash = Get-PasswordHash -Password $inputPwd -Salt $authObj.Salt
-        if ($calcHash -eq $authObj.Hash) {
-            Write-Host "`n [v] 인증에 성공하였습니다!" -ForegroundColor Green
+        try {
+            # 실제 복호화 시도로 비밀번호 검증
+            $null = Decrypt-Aes256 -EncryptedBase64 $encryptedContent -Password $inputPwd
+            $Global:SessionPassword = $inputPwd
+            Write-Host "`n [v] 복호화 인증 성공! 안전하게 자산 관리자를 로드합니다." -ForegroundColor Green
             Start-Sleep -Milliseconds 600
             return
-        } else {
+        } catch {
             $attempts++
             $remain = $maxAttempts - $attempts
-            Write-Host "`n [!] 비밀번호가 일치하지 않습니다. (남은 횟수: $remain 회)" -ForegroundColor Red
+            Write-Host "`n [!] 비밀번호가 일치하지 않거나 복호화에 실패했습니다. (남은 횟수: $remain 회)" -ForegroundColor Red
             Start-Sleep -Seconds 1
         }
     }
@@ -151,28 +264,23 @@ function Assert-MasterPassword {
     exit
 }
 
-# 7. 마스터 비밀번호 변경 함수
+# 7. 마스터 비밀번호 변경 (전체 데이터 재암호화)
 function Change-MasterPasswordFlow {
     try {
         Clear-Host
         Show-Banner -Title "마스터 비밀번호 변경" -Color "Magenta"
-        Write-Host " [*] 변경을 취소하려면 언제든 창을 닫거나 ESC/빈칸으로 진행하세요.`n" -ForegroundColor Gray
+        Write-Host " [*] 변경 시 모든 자산 데이터가 새로운 마스터 키로 재암호화됩니다.`n" -ForegroundColor Cyan
 
-        $encryptedAuth = (Get-Content $AuthFile -Raw).Trim()
-        $authJson = Unprotect-Data -EncryptedText $encryptedAuth
-        $authObj = $authJson | ConvertFrom-Json
-
-        $currPwd = Read-MaskedInput -PromptText " ▶ 현재 마스터 비밀번호"
-        $calcHash = Get-PasswordHash -Password $currPwd -Salt $authObj.Salt
-        if ($calcHash -ne $authObj.Hash) {
+        $currPwd = Read-MaskedInput -PromptText " ▶ 현재 마스터 비밀번호 확인"
+        if ($currPwd -ne $Global:SessionPassword) {
             Write-Host "`n [!] 현재 비밀번호가 일치하지 않습니다." -ForegroundColor Red
             $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
             return
         }
 
-        $newPwd1 = Read-MaskedInput -PromptText "`n ▶ 변경할 새 마스터 비밀번호"
-        if ([string]::IsNullOrWhiteSpace($newPwd1) -or $newPwd1.Length -lt 4) {
-            Write-Host "`n [!] 새 비밀번호는 최소 4자리 이상이어야 합니다." -ForegroundColor Red
+        $newPwd1 = Read-MaskedInput -PromptText "`n ▶ 변경할 새 마스터 비밀번호 (최소 6자리)"
+        if ([string]::IsNullOrWhiteSpace($newPwd1) -or $newPwd1.Length -lt 6) {
+            Write-Host "`n [!] 새 비밀번호는 최소 6자리 이상이어야 합니다." -ForegroundColor Red
             $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
             return
         }
@@ -184,8 +292,14 @@ function Change-MasterPasswordFlow {
             return
         }
 
-        Set-MasterPassword -NewPassword $newPwd1
-        Write-Host "`n [v] 마스터 비밀번호가 성공적으로 변경되었습니다!" -ForegroundColor Green
+        # 기존 자산 가져오기
+        $assets = @(Get-Assets)
+        
+        # 새 비밀번호로 세션 교체 후 저장 (재암호화)
+        $Global:SessionPassword = $newPwd1
+        Save-Assets -Assets $assets
+
+        Write-Host "`n [v] 모든 자산 데이터가 새 비밀번호로 안전하게 재암호화되었습니다!" -ForegroundColor Green
         $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
     } catch {
         Write-Host "`n [!] 비밀번호 변경 중 오류가 발생했습니다: $($_.Exception.Message)" -ForegroundColor Red
@@ -193,37 +307,7 @@ function Change-MasterPasswordFlow {
     }
 }
 
-# 8. 자산 불러오기
-function Get-Assets {
-    if (-not (Test-Path $DataFile)) { return @() }
-    try {
-        $EncryptedText = (Get-Content $DataFile -Raw).Trim()
-        if ([string]::IsNullOrWhiteSpace($EncryptedText)) { return @() }
-        $PlainText = Unprotect-Data -EncryptedText $EncryptedText
-        $result = $PlainText | ConvertFrom-Json
-        if ($result -isnot [array]) {
-            return @($result)
-        }
-        return $result
-    } catch {
-        Write-Warning "데이터 복호화 실패. 파일 생성 계정과 일치하는지 확인하세요."
-        return @()
-    }
-}
-
-# 9. 자산 저장하기
-function Save-Assets {
-    param([array]$Assets)
-    if ($Assets.Count -eq 0) {
-        $JsonText = '[]'
-    } else {
-        $JsonText = ConvertTo-Json -InputObject @($Assets) -Depth 3 -Compress
-    }
-    $EncryptedText = Protect-Data -PlainText $JsonText
-    [System.IO.File]::WriteAllText($DataFile, $EncryptedText, [System.Text.UTF8Encoding]::new($false))
-}
-
-# 10. 자산 검색 공통 함수
+# 8. 자산 검색 공통 함수
 function Search-Assets {
     param([array]$AllAssets, [string]$Keyword)
     $isIPLike = $Keyword -match '^[\d\.\:]+$'
@@ -244,7 +328,7 @@ function Search-Assets {
     return @($results)
 }
 
-# 11. 한글 및 영문 너비 계산용 유틸리티
+# 9. 한글 및 영문 너비 계산용 유틸리티
 function Get-DisplayWidth {
     param([string]$str)
     if ($null -eq $str) { return 0 }
@@ -276,7 +360,7 @@ function Pad-RightDisplay {
     return $str
 }
 
-# 12. 검색 결과를 표로 깔끔하게 출력
+# 10. 검색 결과를 표로 출력
 function Show-NumberedResults {
     param([array]$Results)
     
@@ -307,7 +391,7 @@ function Show-NumberedResults {
     }
 }
 
-# 13. UI 공통 함수: 상단 배너 출력
+# 11. UI 공통 배너
 function Show-Banner {
     param([string]$Title, [string]$Color = "Cyan")
     Write-Host " ╔═════════════════════════════════════════════════════════════╗" -ForegroundColor $Color
@@ -319,7 +403,7 @@ function Show-Banner {
     Write-Host " ╚═════════════════════════════════════════════════════════════╝`n" -ForegroundColor $Color
 }
 
-# 14. 사용자 입력 및 취소(q/엔터) 처리 래퍼 함수
+# 12. 사용자 입력 및 취소 처리
 function Read-Input {
     param(
         [string]$PromptText,
@@ -339,15 +423,15 @@ function Read-Input {
     return $val
 }
 
-# ──────────────────────────────────────────
-# 실행 시 마스터 비밀번호 인증 수행
-# ──────────────────────────────────────────
-Assert-MasterPassword
+# ─────────────────────────────────────────────────────────────
+# 13. 프로그램 시작: 마스터 비밀번호 인증 및 세션 활성화
+# ─────────────────────────────────────────────────────────────
+Initialize-SessionAuth
 
-# 15. 메인 메뉴 루프
+# 14. 메인 메뉴 루프
 while ($true) {
     Clear-Host
-    Show-Banner -Title "SECURE ASSET MANAGER v1.1" -Color "Cyan"
+    Show-Banner -Title "SECURE ASSET MANAGER (AES-256)" -Color "Cyan"
     
     Write-Host "   [1] 자산 검색                 [2] 자산 조회 (전체)" -ForegroundColor White
     Write-Host "   [3] 자산 추가                 [4] 자산 수정" -ForegroundColor White
