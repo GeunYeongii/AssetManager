@@ -1,3 +1,4 @@
 @echo off
-powershell.exe -ExecutionPolicy Bypass -File "%~dp0AssetManager.ps1"
+chcp 65001 > nul
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0AssetManager.ps1"
 pause
