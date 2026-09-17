@@ -1,0 +1,7 @@
+# Sensitive Data / Local asset data
+SecureAssets.dat
+*.dat
+
+# PowerShell / Windows temp files
+*.tmp
+*.log
