@@ -1,17 +1,18 @@
-﻿# ==========================================
-# PowerShell 보안 자산 관리자 (JSON + DPAPI)
+# ==========================================
+# PowerShell 보안 자산 관리자 (JSON + DPAPI + 마스터 비밀번호 인증)
 # ==========================================
 
 $DataFile = "$PSScriptRoot\SecureAssets.dat"
+$AuthFile = "$PSScriptRoot\SecureAuth.dat"
 
-# 1. 데이터 암호화 함수
+# 1. 데이터 암호화 함수 (DPAPI)
 function Protect-Data {
     param([string]$PlainText)
     $Secure = ConvertTo-SecureString -String $PlainText -AsPlainText -Force
     ConvertFrom-SecureString -SecureString $Secure
 }
 
-# 2. 데이터 복호화 함수
+# 2. 데이터 복호화 함수 (DPAPI)
 function Unprotect-Data {
     param([string]$EncryptedText)
     $Secure = ConvertTo-SecureString -String $EncryptedText
@@ -21,7 +22,178 @@ function Unprotect-Data {
     return $PlainText
 }
 
-# 3. 자산 불러오기
+# 3. 비밀번호 마스킹 입력 함수 (*** 표시)
+function Read-MaskedInput {
+    param([string]$PromptText = " ▶ 비밀번호를 입력하세요")
+    Write-Host -NoNewline "$PromptText: "
+    $pwd = ""
+    while ($true) {
+        $key = [System.Console]::ReadKey($true)
+        if ($key.Key -eq [System.ConsoleKey]::Enter) {
+            Write-Host ""
+            break
+        } elseif ($key.Key -eq [System.ConsoleKey]::Backspace) {
+            if ($pwd.Length -gt 0) {
+                $pwd = $pwd.Substring(0, $pwd.Length - 1)
+                Write-Host -NoNewline "`b `b"
+            }
+        } elseif ($key.Key -eq [System.ConsoleKey]::Escape) {
+            Write-Host ""
+            return ""
+        } elseif ([char]::IsControl($key.KeyChar)) {
+            continue
+        } else {
+            $pwd += $key.KeyChar
+            Write-Host -NoNewline "*"
+        }
+    }
+    return $pwd
+}
+
+# 4. SHA-256 + Salt 해시 생성
+function Get-PasswordHash {
+    param([string]$Password, [string]$Salt)
+    $hasher = [System.Security.Cryptography.SHA256]::Create()
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Password + $Salt)
+    $hashBytes = $hasher.ComputeHash($bytes)
+    return [System.Convert]::ToBase64String($hashBytes)
+}
+
+# 5. 마스터 비밀번호 저장 함수
+function Set-MasterPassword {
+    param([string]$NewPassword)
+    $salt = [System.Guid]::NewGuid().ToString("N")
+    $hash = Get-PasswordHash -Password $NewPassword -Salt $salt
+    $authObj = @{
+        Salt = $salt
+        Hash = $hash
+    }
+    $authJson = ConvertTo-Json -InputObject $authObj -Compress
+    $encryptedAuth = Protect-Data -PlainText $authJson
+    [System.IO.File]::WriteAllText($AuthFile, $encryptedAuth, [System.Text.UTF8Encoding]::new($false))
+}
+
+# 6. 마스터 비밀번호 검증 및 초기 설정 절차
+function Assert-MasterPassword {
+    Clear-Host
+    # 인증 파일이 없는 경우 -> 최초 설정
+    if (-not (Test-Path $AuthFile)) {
+        Show-Banner -Title "마스터 비밀번호 신규 설정" -Color "Yellow"
+        Write-Host " [!] 최초 실행입니다. 프로그램 보호를 위한 마스터 비밀번호를 설정하세요.`n" -ForegroundColor Yellow
+        
+        while ($true) {
+            $pwd1 = Read-MaskedInput -PromptText " ▶ 새 마스터 비밀번호 입력"
+            if ([string]::IsNullOrWhiteSpace($pwd1)) {
+                Write-Host " [!] 비밀번호는 공백일 수 없습니다.`n" -ForegroundColor Red
+                continue
+            }
+            if ($pwd1.Length -lt 4) {
+                Write-Host " [!] 비밀번호는 최소 4자리 이상이어야 합니다.`n" -ForegroundColor Red
+                continue
+            }
+            
+            $pwd2 = Read-MaskedInput -PromptText " ▶ 마스터 비밀번호 확인"
+            if ($pwd1 -ne $pwd2) {
+                Write-Host " [!] 비밀번호가 일치하지 않습니다. 다시 입력해주세요.`n" -ForegroundColor Red
+                continue
+            }
+            
+            Set-MasterPassword -NewPassword $pwd1
+            Write-Host "`n [v] 마스터 비밀번호가 안전하게 설정되었습니다!" -ForegroundColor Green
+            Start-Sleep -Seconds 1
+            break
+        }
+        return
+    }
+
+    # 인증 파일이 있는 경우 -> 비밀번호 검증
+    try {
+        $encryptedAuth = (Get-Content $AuthFile -Raw).Trim()
+        $authJson = Unprotect-Data -EncryptedText $encryptedAuth
+        $authObj = $authJson | ConvertFrom-Json
+    } catch {
+        Write-Host "`n [!] 인증 데이터 복호화 실패. 현재 Windows 계정과 일치하는지 확인하세요." -ForegroundColor Red
+        $null = Read-Host "`n 아무 키나 누르면 종료됩니다..."
+        exit
+    }
+
+    $maxAttempts = 5
+    $attempts = 0
+
+    while ($attempts -lt $maxAttempts) {
+        Clear-Host
+        Show-Banner -Title "보 안 인 증 (MASTER AUTH)" -Color "Cyan"
+        Write-Host " 🔐 자산 관리자에 접근하려면 마스터 비밀번호를 입력해주세요.`n" -ForegroundColor White
+        
+        $inputPwd = Read-MaskedInput -PromptText " ▶ 마스터 비밀번호"
+        
+        if ([string]::IsNullOrEmpty($inputPwd)) {
+            Write-Host " [!] 비밀번호를 입력해주세요." -ForegroundColor Yellow
+            Start-Sleep -Seconds 1
+            continue
+        }
+
+        $calcHash = Get-PasswordHash -Password $inputPwd -Salt $authObj.Salt
+        if ($calcHash -eq $authObj.Hash) {
+            Write-Host "`n [v] 인증에 성공하였습니다!" -ForegroundColor Green
+            Start-Sleep -Milliseconds 600
+            return
+        } else {
+            $attempts++
+            $remain = $maxAttempts - $attempts
+            Write-Host "`n [!] 비밀번호가 일치하지 않습니다. (남은 횟수: $remain 회)" -ForegroundColor Red
+            Start-Sleep -Seconds 1
+        }
+    }
+
+    Write-Host "`n [!] 5회 연속 인증 실패로 보안을 위해 프로그램을 강제 종료합니다." -ForegroundColor Red
+    Start-Sleep -Seconds 2
+    exit
+}
+
+# 7. 마스터 비밀번호 변경 함수
+function Change-MasterPasswordFlow {
+    try {
+        Clear-Host
+        Show-Banner -Title "마스터 비밀번호 변경" -Color "Magenta"
+        Write-Host " [*] 변경을 취소하려면 언제든 창을 닫거나 ESC/빈칸으로 진행하세요.`n" -ForegroundColor Gray
+
+        $encryptedAuth = (Get-Content $AuthFile -Raw).Trim()
+        $authJson = Unprotect-Data -EncryptedText $encryptedAuth
+        $authObj = $authJson | ConvertFrom-Json
+
+        $currPwd = Read-MaskedInput -PromptText " ▶ 현재 마스터 비밀번호"
+        $calcHash = Get-PasswordHash -Password $currPwd -Salt $authObj.Salt
+        if ($calcHash -ne $authObj.Hash) {
+            Write-Host "`n [!] 현재 비밀번호가 일치하지 않습니다." -ForegroundColor Red
+            $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
+            return
+        }
+
+        $newPwd1 = Read-MaskedInput -PromptText "`n ▶ 변경할 새 마스터 비밀번호"
+        if ([string]::IsNullOrWhiteSpace($newPwd1) -or $newPwd1.Length -lt 4) {
+            Write-Host "`n [!] 새 비밀번호는 최소 4자리 이상이어야 합니다." -ForegroundColor Red
+            $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
+            return
+        }
+
+        $newPwd2 = Read-MaskedInput -PromptText " ▶ 변경할 새 마스터 비밀번호 확인"
+        if ($newPwd1 -ne $newPwd2) {
+            Write-Host "`n [!] 새 비밀번호가 일치하지 않습니다." -ForegroundColor Red
+            $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
+            return
+        }
+
+        Set-MasterPassword -NewPassword $newPwd1
+        Write-Host "`n [v] 마스터 비밀번호가 성공적으로 변경되었습니다!" -ForegroundColor Green
+        $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
+    } catch {
+        Write-Host "`n [!] 비밀번호 변경 중 오류가 발생했습니다: $($_.Exception.Message)" -ForegroundColor Red
+        $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
+    }
+}
+
+# 8. 자산 불러오기
 function Get-Assets {
     if (-not (Test-Path $DataFile)) { return @() }
     try {
@@ -29,7 +201,6 @@ function Get-Assets {
         if ([string]::IsNullOrWhiteSpace($EncryptedText)) { return @() }
         $PlainText = Unprotect-Data -EncryptedText $EncryptedText
         $result = $PlainText | ConvertFrom-Json
-        # 항상 배열로 반환 (단일 객체일 경우 배열로 감싸기)
         if ($result -isnot [array]) {
             return @($result)
         }
@@ -40,10 +211,9 @@ function Get-Assets {
     }
 }
 
-# 4. 자산 저장하기
+# 9. 자산 저장하기
 function Save-Assets {
     param([array]$Assets)
-    # 빈 배열이면 빈 JSON 배열로, 아니면 항상 배열 형태로 직렬화
     if ($Assets.Count -eq 0) {
         $JsonText = '[]'
     } else {
@@ -53,7 +223,7 @@ function Save-Assets {
     [System.IO.File]::WriteAllText($DataFile, $EncryptedText, [System.Text.UTF8Encoding]::new($false))
 }
 
-# 5. 자산 검색 공통 함수
+# 10. 자산 검색 공통 함수
 function Search-Assets {
     param([array]$AllAssets, [string]$Keyword)
     $isIPLike = $Keyword -match '^[\d\.\:]+$'
@@ -74,7 +244,7 @@ function Search-Assets {
     return @($results)
 }
 
-# 6. 한글 및 영문 너비 계산용 유틸리티
+# 11. 한글 및 영문 너비 계산용 유틸리티
 function Get-DisplayWidth {
     param([string]$str)
     if ($null -eq $str) { return 0 }
@@ -106,7 +276,7 @@ function Pad-RightDisplay {
     return $str
 }
 
-# 7. 검색 결과를 표로 깔끔하게 출력 (정확한 칸 맞춤)
+# 12. 검색 결과를 표로 깔끔하게 출력
 function Show-NumberedResults {
     param([array]$Results)
     
@@ -137,7 +307,7 @@ function Show-NumberedResults {
     }
 }
 
-# 8. UI 공통 함수: 상단 배너 출력
+# 13. UI 공통 함수: 상단 배너 출력
 function Show-Banner {
     param([string]$Title, [string]$Color = "Cyan")
     Write-Host " ╔═════════════════════════════════════════════════════════════╗" -ForegroundColor $Color
@@ -149,7 +319,7 @@ function Show-Banner {
     Write-Host " ╚═════════════════════════════════════════════════════════════╝`n" -ForegroundColor $Color
 }
 
-# 9. 사용자 입력 및 취소(q/엔터) 처리 래퍼 함수
+# 14. 사용자 입력 및 취소(q/엔터) 처리 래퍼 함수
 function Read-Input {
     param(
         [string]$PromptText,
@@ -169,14 +339,20 @@ function Read-Input {
     return $val
 }
 
-# 10. 메인 메뉴 루프
+# ──────────────────────────────────────────
+# 실행 시 마스터 비밀번호 인증 수행
+# ──────────────────────────────────────────
+Assert-MasterPassword
+
+# 15. 메인 메뉴 루프
 while ($true) {
     Clear-Host
-    Show-Banner -Title "SECURE ASSET MANAGER v1.0" -Color "Cyan"
+    Show-Banner -Title "SECURE ASSET MANAGER v1.1" -Color "Cyan"
     
     Write-Host "   [1] 자산 검색                 [2] 자산 조회 (전체)" -ForegroundColor White
     Write-Host "   [3] 자산 추가                 [4] 자산 수정" -ForegroundColor White
-    Write-Host "   [5] 자산 삭제                 [0] 프로그램 종료" -ForegroundColor DarkGray
+    Write-Host "   [5] 자산 삭제                 [6] 마스터 비밀번호 변경" -ForegroundColor White
+    Write-Host "   [0] 프로그램 종료" -ForegroundColor DarkGray
     Write-Host " ───────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
     
     while ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null }
@@ -398,6 +574,12 @@ while ($true) {
             }
         }
 
+        # ── 6. 마스터 비밀번호 변경 ──
+        '6' {
+            Change-MasterPasswordFlow
+        }
+
+        # ── 0. 프로그램 종료 ──
         '0' { 
             Write-Host "`n 프로그램을 종료합니다. 안전하게 닫힙니다." -ForegroundColor Cyan
             exit
