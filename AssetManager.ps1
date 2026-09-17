@@ -355,8 +355,8 @@ function Select-InteractiveMenu {
                     $line2 = "$prefix2$($item2.Label)"
                 }
 
-                $color1 = if ($isSel1) { "Cyan" } elseif ($item1.Key -eq '0') { "DarkGray" } else { "White" }
-                $color2 = if ($isSel2) { "Cyan" } elseif ($idx2 -lt $count -and $MenuItems[$idx2].Key -eq '0') { "DarkGray" } else { "White" }
+                $color1 = if ($isSel1) { "Green" } elseif ($item1.Key -eq '0') { "DarkGray" } else { "Gray" }
+                $color2 = if ($isSel2) { "Green" } elseif ($idx2 -lt $count -and $MenuItems[$idx2].Key -eq '0') { "DarkGray" } else { "Gray" }
 
                 Write-Host $pad1 -NoNewline -ForegroundColor $color1
                 if ($line2) {
@@ -370,7 +370,7 @@ function Select-InteractiveMenu {
                 $item = $MenuItems[$i]
                 $isSel = ($i -eq $selectedIndex)
                 $prefix = if ($isSel) { " ▶ " } else { "   " }
-                $color = if ($isSel) { "Cyan" } elseif ($item.Key -eq '0') { "DarkGray" } else { "White" }
+                $color = if ($isSel) { "Green" } elseif ($item.Key -eq '0') { "DarkGray" } else { "Gray" }
                 Write-Host "$prefix$($item.Label)" -ForegroundColor $color
             }
         }
@@ -754,7 +754,7 @@ function Select-AssetFromTable {
             $isSel = ($i -eq $selectedIndex)
 
             $prefix = if ($isSel) { " ▶ " } else { "   " }
-            $fg = if ($isSel) { "Cyan" } else { "White" }
+            $fg = if ($isSel) { "Green" } else { "Gray" }
 
             $cNo   = Pad-RightDisplay $r.NoStr $wNo
             $cName = Pad-RightDisplay $r.NameStr $wName
