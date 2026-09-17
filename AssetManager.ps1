@@ -99,7 +99,10 @@ function Unprotect-LegacyDpapi {
 
 # 3. 비밀번호 마스킹 입력 함수 (*** 표시)
 function Read-MaskedInput {
-    param([string]$PromptText = " ▶ 비밀번호를 입력하세요")
+    param(
+        [string]$PromptText = " ▶ 비밀번호를 입력하세요",
+        [bool]$IsEditMode = $false
+    )
     Write-Host -NoNewline "$($PromptText): "
     $pwd = ""
     while ($true) {
@@ -114,7 +117,8 @@ function Read-MaskedInput {
             }
         } elseif ($key.Key -eq [System.ConsoleKey]::Escape) {
             Write-Host ""
-            return ""
+            if ($IsEditMode) { return "" }
+            throw [System.Exception]::new("CANCEL_ACTION")
         } elseif ([char]::IsControl($key.KeyChar)) {
             continue
         } else {
@@ -122,10 +126,15 @@ function Read-MaskedInput {
             Write-Host -NoNewline "*"
         }
     }
+    
+    # 수정 모드가 아닐 때 q 단독 입력 시 취소
+    if (-not $IsEditMode -and ($pwd -eq 'q' -or $pwd -eq 'Q' -or $pwd -eq 'ㅂ')) {
+        throw [System.Exception]::new("CANCEL_ACTION")
+    }
     return $pwd
 }
 
-# 4. 데이터 정규화 함수 (CLI/GUI AccessType 속성 보장 및 하위 호환)
+# 4. 데이터 정규화 함수 (CLI/GUI AccessType 보장 및 윈도우 administrator 역할 root 통일)
 function Normalize-Asset {
     param($raw)
     $accList = @()
@@ -133,22 +142,32 @@ function Normalize-Asset {
         $rawAccounts = if ($raw.Accounts -is [array]) { @($raw.Accounts) } else { @($raw.Accounts) }
         foreach ($acc in $rawAccounts) {
             $accessType = if ($acc.PSObject.Properties['AccessType'] -and $acc.AccessType) { [string]$acc.AccessType } else { "CLI" }
+            $accId = [string]$acc.ID
+            
+            # 윈도우 administrator 또는 root ID는 역할을 root로 정규화
+            $role = if ($acc.AccountType) { [string]$acc.AccountType } else { "일반" }
+            if ($accId.ToLower() -eq "root" -or $accId.ToLower() -eq "administrator") {
+                $role = "root"
+            }
+
             $accList += [PSCustomObject]@{
                 AccountID   = if ($acc.AccountID) { [string]$acc.AccountID } else { [guid]::NewGuid().ToString() }
                 AccessType  = $accessType
-                AccountType = if ($acc.AccountType) { [string]$acc.AccountType } else { "일반" }
-                ID          = [string]$acc.ID
+                AccountType = $role
+                ID          = $accId
                 PW          = [string]$acc.PW
                 Description = if ($acc.Description) { [string]$acc.Description } else { "" }
             }
         }
     } elseif ($raw.PSObject.Properties['ID'] -or $raw.PSObject.Properties['PW']) {
         if ($raw.ID -or $raw.PW) {
+            $accId = [string]$raw.ID
+            $role = if ($accId.ToLower() -eq "root" -or $accId.ToLower() -eq "administrator") { "root" } else { "일반" }
             $accList += [PSCustomObject]@{
                 AccountID   = [guid]::NewGuid().ToString()
                 AccessType  = "CLI"
-                AccountType = "기본"
-                ID          = [string]$raw.ID
+                AccountType = $role
+                ID          = $accId
                 PW          = [string]$raw.PW
                 Description = "기존 등록 계정"
             }
@@ -216,19 +235,15 @@ function Test-AccountExists {
     return $false
 }
 
-# 8. 동일 AccessType(CLI/GUI) 내 root 계정 존재 여부 검사 함수
-function Test-HasRootAccount {
-    param(
-        [array]$Accounts,
-        [string]$AccessType
-    )
+# 8. 자산 전체에서 단일 고유 root 역할 보유 여부 검사 함수
+function Test-HasRootRole {
+    param([array]$Accounts)
     if (-not $Accounts -or $Accounts.Count -eq 0) { return $false }
-    $normAccess = $AccessType.Trim().ToUpper()
     foreach ($acc in $Accounts) {
-        if ($acc.AccessType.ToUpper() -eq $normAccess) {
-            if ($acc.ID.Trim().ToLower() -eq "root" -or $acc.AccountType.Trim().ToLower() -eq "root") {
-                return $true
-            }
+        $idLower = $acc.ID.Trim().ToLower()
+        $roleLower = $acc.AccountType.Trim().ToLower()
+        if ($roleLower -eq "root" -or $idLower -eq "root" -or $idLower -eq "administrator") {
+            return $true
         }
     }
     return $false
@@ -523,7 +538,7 @@ function Search-Assets {
     return @($results)
 }
 
-# 16. 단일 계정 정보 입력 헬퍼 (CLI/GUI 선택 + root 자동 판별)
+# 16. 단일 계정 정보 입력 헬퍼 (CLI/GUI 선택 + root 역할 단일 고유화 + 패스워드 * 마스킹)
 function Read-NewAccountInput {
     param(
         [array]$ExistingAccounts,
@@ -533,8 +548,8 @@ function Read-NewAccountInput {
     
     # 1. 접속 유형 선택 (CLI vs GUI)
     Write-Host " ▶ 접속 유형을 선택하세요:" -ForegroundColor White
-    Write-Host "   [1] CLI (SSH/Telnet/콘솔)" -ForegroundColor DarkGray
-    Write-Host "   [2] GUI (웹콘솔/RDP/윈도우원격)" -ForegroundColor DarkGray
+    Write-Host "   [1] CLI (SSH/Telnet/Console/RDP)" -ForegroundColor DarkGray
+    Write-Host "   [2] GUI (웹콘솔)" -ForegroundColor DarkGray
     $typeChoice = (Read-Host "   번호 선택 (기본값: 1)").Trim()
     
     $accessType = "CLI"
@@ -542,15 +557,18 @@ function Read-NewAccountInput {
         $accessType = "GUI"
     }
 
-    $hasRoot = Test-HasRootAccount -Accounts $ExistingAccounts -AccessType $accessType
+    # 자산 전체에 root(관리자) 역할이 이미 존재하는지 확인
+    $hasRootRole = Test-HasRootRole -Accounts $ExistingAccounts
 
     # 2. 계정 ID 입력 및 중복 체크 루프
     $accID = ""
     while ($true) {
         $accID = Read-Input " ▶ 계정 ID"
-        
-        if ($accID.ToLower() -eq "root" -and $hasRoot) {
-            Write-Host " [!] [$accessType]에 이미 root 계정이 등록되어 있어 root는 추가할 수 없습니다.`n" -ForegroundColor Red
+        $normId = $accID.ToLower()
+
+        # 이미 root 역할이 있는데 root 또는 administrator를 또 추가하려는 경우 차단
+        if (($normId -eq "root" -or $normId -eq "administrator") -and $hasRootRole) {
+            Write-Host " [!] 이미 해당 자산에 root(관리자) 계정이 등록되어 있습니다. 일반 계정 ID를 입력하세요.`n" -ForegroundColor Red
             continue
         }
         
@@ -563,12 +581,15 @@ function Read-NewAccountInput {
 
     # 3. 계정 구분/역할(Role) 결정
     $accRole = ""
-    if ($accID.ToLower() -eq "root") {
+    if ($accID.ToLower() -eq "root" -or $accID.ToLower() -eq "administrator") {
+        # root 또는 administrator ID는 역할을 root로 고정
         $accRole = "root"
-    } elseif ($hasRoot) {
+    } elseif ($hasRootRole) {
+        # 이미 자산에 root가 존재하면 역할은 자동으로 '일반'으로 고정 (입력 생략)
         $accRole = "일반"
-        Write-Host " [*] [$accessType]에 이미 root가 존재하여 계정 역할이 자동으로 '일반'으로 지정됩니다." -ForegroundColor DarkGray
+        Write-Host " [*] 이미 관리자(root) 계정이 존재하여 계정 역할이 자동으로 '일반'으로 지정됩니다." -ForegroundColor DarkGray
     } else {
+        # 아직 root가 없는 자산이면 역할 입력 받음
         $inRole = Read-Input " ▶ 계정 구분/역할" -AllowEmpty $true
         if ([string]::IsNullOrWhiteSpace($inRole)) {
             $accRole = "일반"
@@ -577,8 +598,8 @@ function Read-NewAccountInput {
         }
     }
 
-    # 4. 패스워드 및 설명 입력 (패스워드는 화면에 일반 입력 또는 마스킹 선택 가능하나 입력 후 평문 보관)
-    $accPW   = Read-Input " ▶ 패스워드"
+    # 4. 패스워드 입력 (* 마스킹 입력)
+    $accPW = Read-MaskedInput -PromptText " ▶ 패스워드"
     $accDesc = Read-Input " ▶ 계정 설명/메모" -AllowEmpty $true
 
     return [PSCustomObject]@{
@@ -696,44 +717,79 @@ function Show-AssetDetailManage {
                     }
 
                     $targetAcc = $accList[$idx]
+                    $isRootAcc = ($targetAcc.AccountType.ToLower() -eq "root" -or $targetAcc.ID.ToLower() -eq "root" -or $targetAcc.ID.ToLower() -eq "administrator")
+
                     Write-Host "`n [*] 수정할 값을 입력하세요. (기존 유지 시 Enter, 취소 시 q)" -ForegroundColor Cyan
-                    
-                    $uAccess = Read-Input " ▶ 접속 유형 [CLI/GUI] [$($targetAcc.AccessType)]" -IsEditMode $true
-                    $finalAccess = if ($uAccess) { $uAccess.ToUpper() } else { $targetAcc.AccessType }
 
-                    $uID = Read-Input " ▶ 계정 ID [$($targetAcc.ID)]" -IsEditMode $true
-                    $finalID = if ($uID) { $uID } else { $targetAcc.ID }
+                    if ($isRootAcc) {
+                        # root 계정인 경우 ID/역할은 고정 안내 후 패스워드와 설명만 입력
+                        Write-Host " [*] 관리자(root) 계정 수정 모드입니다. 계정 ID와 역할([root])은 자동 유지됩니다." -ForegroundColor Yellow
+                        
+                        $uPW = Read-MaskedInput -PromptText " ▶ 변경할 패스워드 (기존 유지 시 Enter)" -IsEditMode $true
+                        $uDesc = Read-Input " ▶ 계정 설명/메모 [$($targetAcc.Description)]" -IsEditMode $true
 
-                    if ($uID -or $uAccess) {
-                        $otherAccounts = @($targetAsset.Accounts | Where-Object { $_.AccountID -ne $targetAcc.AccountID })
-                        if (Test-AccountExists -Accounts $otherAccounts -AccessType $finalAccess -CheckID $finalID) {
-                            Write-Host "`n [!] [$finalAccess]에 이미 '$finalID' 계정이 등록되어 있어 변경할 수 없습니다." -ForegroundColor Red
-                            Start-Sleep -Seconds 1
-                            break
-                        }
-                    }
-
-                    $uRole = Read-Input " ▶ 계정 구분/역할 [$($targetAcc.AccountType)]" -IsEditMode $true
-                    $uPW   = Read-Input " ▶ 패스워드 [$($targetAcc.PW)]" -IsEditMode $true
-                    $uDesc = Read-Input " ▶ 계정 설명/메모 [$($targetAcc.Description)]" -IsEditMode $true
-
-                    for ($i = 0; $i -lt $allAssets.Count; $i++) {
-                        if ($allAssets[$i].AssetID -eq $AssetID) {
-                            for ($j = 0; $j -lt $allAssets[$i].Accounts.Count; $j++) {
-                                if ($allAssets[$i].Accounts[$j].AccountID -eq $targetAcc.AccountID) {
-                                    if ($uAccess) { $allAssets[$i].Accounts[$j].AccessType = $finalAccess }
-                                    if ($uID)     { $allAssets[$i].Accounts[$j].ID = $finalID }
-                                    if ($uRole)   { $allAssets[$i].Accounts[$j].AccountType = $uRole }
-                                    if ($uPW)     { $allAssets[$i].Accounts[$j].PW = $uPW }
-                                    if ($uDesc)   { $allAssets[$i].Accounts[$j].Description = $uDesc }
-                                    break
+                        for ($i = 0; $i -lt $allAssets.Count; $i++) {
+                            if ($allAssets[$i].AssetID -eq $AssetID) {
+                                for ($j = 0; $j -lt $allAssets[$i].Accounts.Count; $j++) {
+                                    if ($allAssets[$i].Accounts[$j].AccountID -eq $targetAcc.AccountID) {
+                                        if ($uPW)   { $allAssets[$i].Accounts[$j].PW = $uPW }
+                                        if ($uDesc) { $allAssets[$i].Accounts[$j].Description = $uDesc }
+                                        break
+                                    }
                                 }
+                                break
                             }
-                            break
+                        }
+                    } else {
+                        # 일반 계정 수정 모드
+                        $uAccess = Read-Input " ▶ 접속 유형 [CLI/GUI] [$($targetAcc.AccessType)]" -IsEditMode $true
+                        $finalAccess = if ($uAccess) { $uAccess.ToUpper() } else { $targetAcc.AccessType }
+
+                        $uID = Read-Input " ▶ 계정 ID [$($targetAcc.ID)]" -IsEditMode $true
+                        $finalID = if ($uID) { $uID } else { $targetAcc.ID }
+
+                        # 일반 계정을 root나 administrator로 변경하려는 경우 체크
+                        if ($finalID.ToLower() -eq "root" -or $finalID.ToLower() -eq "administrator") {
+                            $hasRootAlready = Test-HasRootRole -Accounts @($targetAsset.Accounts | Where-Object { $_.AccountID -ne $targetAcc.AccountID })
+                            if ($hasRootAlready) {
+                                Write-Host "`n [!] 이미 root(관리자) 계정이 존재하므로 일반 계정을 root로 변경할 수 없습니다." -ForegroundColor Red
+                                Start-Sleep -Seconds 1
+                                break
+                            }
+                        }
+
+                        if ($uID -or $uAccess) {
+                            $otherAccounts = @($targetAsset.Accounts | Where-Object { $_.AccountID -ne $targetAcc.AccountID })
+                            if (Test-AccountExists -Accounts $otherAccounts -AccessType $finalAccess -CheckID $finalID) {
+                                Write-Host "`n [!] [$finalAccess]에 이미 '$finalID' 계정이 등록되어 있어 변경할 수 없습니다." -ForegroundColor Red
+                                Start-Sleep -Seconds 1
+                                break
+                            }
+                        }
+
+                        $uRole = Read-Input " ▶ 계정 구분/역할 [$($targetAcc.AccountType)]" -IsEditMode $true
+                        $uPW   = Read-MaskedInput -PromptText " ▶ 패스워드 (기존 유지 시 Enter)" -IsEditMode $true
+                        $uDesc = Read-Input " ▶ 계정 설명/메모 [$($targetAcc.Description)]" -IsEditMode $true
+
+                        for ($i = 0; $i -lt $allAssets.Count; $i++) {
+                            if ($allAssets[$i].AssetID -eq $AssetID) {
+                                for ($j = 0; $j -lt $allAssets[$i].Accounts.Count; $j++) {
+                                    if ($allAssets[$i].Accounts[$j].AccountID -eq $targetAcc.AccountID) {
+                                        if ($uAccess) { $allAssets[$i].Accounts[$j].AccessType = $finalAccess }
+                                        if ($uID)     { $allAssets[$i].Accounts[$j].ID = $finalID }
+                                        if ($uRole)   { $allAssets[$i].Accounts[$j].AccountType = $uRole }
+                                        if ($uPW)     { $allAssets[$i].Accounts[$j].PW = $uPW }
+                                        if ($uDesc)   { $allAssets[$i].Accounts[$j].Description = $uDesc }
+                                        break
+                                    }
+                                }
+                                break
+                            }
                         }
                     }
+
                     Save-Assets -Assets $allAssets
-                    Write-Host "`n [v] 계정 정보가 수정되었습니다." -ForegroundColor Green
+                    Write-Host "`n [v] 계정 정보가 성공적으로 수정되었습니다." -ForegroundColor Green
                     Start-Sleep -Seconds 1
                 } catch {
                     if ($_.Exception.Message -eq "CANCEL_ACTION") {
@@ -922,7 +978,6 @@ while ($true) {
 
                     Write-Host "`n [*] '$($existingAsset.AssetName)' 자산에 새 계정을 추가합니다. (접속URL 등은 자동 유지됩니다)" -ForegroundColor Cyan
                     
-                    # 추가 메모가 필요한 경우 기존 비고에 덧붙이기 지원
                     $extraNote = Read-Input " ▶ 추가할 비고/메모 (기존 유지 시 Enter)" -AllowEmpty $true -IsEditMode $true
                     if ($extraNote) {
                         for ($i = 0; $i -lt $assets.Count; $i++) {
