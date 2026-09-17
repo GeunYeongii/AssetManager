@@ -2,6 +2,27 @@
 # PowerShell 완전 보안 자산 관리자 (AES-256 + 동적 테이블 너비 자동 정렬)
 # ==============================================================================
 
+# 0. 콘솔 창 및 버퍼 크기 자동 확장 (가로 140, 세로 40 보장)
+try {
+    $rawUI = $Host.UI.RawUI
+    $targetWidth = 140
+    $targetHeight = 40
+    
+    $bufferSize = $rawUI.BufferSize
+    if ($bufferSize.Width -lt $targetWidth) {
+        $bufferSize.Width = $targetWidth
+        $bufferSize.Height = [Math]::Max($bufferSize.Height, 300)
+        $rawUI.BufferSize = $bufferSize
+    }
+    
+    $windowSize = $rawUI.WindowSize
+    if ($windowSize.Width -lt $targetWidth) {
+        $windowSize.Width = $targetWidth
+        $windowSize.Height = [Math]::Max($windowSize.Height, $targetHeight)
+        $rawUI.WindowSize = $windowSize
+    }
+} catch {}
+
 $DataFile = "$PSScriptRoot\SecureAssets.dat"
 $Global:SessionPassword = $null
 
@@ -283,6 +304,30 @@ function Pad-RightDisplay {
     $pad = $totalWidth - $w
     if ($pad -gt 0) { return $str + (" " * $pad) }
     return $str
+}
+
+function Truncate-DisplayString {
+    param(
+        [string]$str,
+        [int]$maxWidth
+    )
+    if ($null -eq $str) { return "" }
+    $total = Get-DisplayWidth $str
+    if ($total -le $maxWidth) { return $str }
+    if ($maxWidth -le 3) { return "..." }
+    
+    $avail = $maxWidth - 3
+    $curWidth = 0
+    $sb = ""
+    foreach ($c in $str.ToCharArray()) {
+        $cWidth = Get-DisplayWidth ([string]$c)
+        if ($curWidth + $cWidth -gt $avail) {
+            break
+        }
+        $sb += $c
+        $curWidth += $cWidth
+    }
+    return $sb + "..."
 }
 
 # 10. UI 공통 배너
@@ -582,11 +627,15 @@ function Change-MasterPasswordFlow {
     }
 }
 
-# 14. 전체/검색 자산 요약 목록 출력 함수 (동적 컬럼 너비 및 완벽 수직 정렬)
+# 14. 전체/검색 자산 요약 목록 출력 함수 (동적 컬럼 너비 및 줄바꿈 방지 안전 출력)
 function Show-AssetSummaryTable {
     param([array]$AssetList)
 
     if ($AssetList.Count -eq 0) { return }
+
+    $winWidth = 140
+    try { $winWidth = [Math]::Max(80, [Console]::WindowWidth) } catch {}
+    $maxRowWidth = $winWidth - 4
 
     # 헤더 텍스트 기본 너비
     $wNo   = Get-DisplayWidth "번호"
@@ -596,7 +645,7 @@ function Show-AssetSummaryTable {
     $wURL  = Get-DisplayWidth "접속URL"
     $wNote = Get-DisplayWidth "비고"
 
-    $rows = @()
+    $rawRows = @()
 
     for ($i = 0; $i -lt $AssetList.Count; $i++) {
         $a = $AssetList[$i]
@@ -621,7 +670,7 @@ function Show-AssetSummaryTable {
         $urlStr = if ($a.WebURL) { $a.WebURL } else { "-" }
         $noteStr = if ($a.Note) { $a.Note } else { "-" }
 
-        $rowItem = [PSCustomObject]@{
+        $rawRows += [PSCustomObject]@{
             NoStr      = $noStr
             NameStr    = $a.AssetName
             IPStr      = $a.IP
@@ -629,7 +678,6 @@ function Show-AssetSummaryTable {
             URLStr     = $urlStr
             NoteStr    = $noteStr
         }
-        $rows += $rowItem
 
         # 최대 너비 계산
         $wNo   = [Math]::Max($wNo, (Get-DisplayWidth $noStr))
@@ -640,10 +688,15 @@ function Show-AssetSummaryTable {
         $wNote = [Math]::Max($wNote, (Get-DisplayWidth $noteStr))
     }
 
-    # 열 간격 (Column Gap: 3칸)
+    # 컬럼별 최대 상한선 적용 (창 너비 초과 방지)
+    $wName = [Math]::Min($wName, 22)
+    $wIP   = [Math]::Min($wIP, 16)
+    $wAccs = [Math]::Min($wAccs, 34)
+    $wURL  = [Math]::Min($wURL, 28)
+    $wNote = [Math]::Min($wNote, 24)
+
     $gap = "   "
 
-    # 헤더 및 구분선 생성
     $hNo   = Pad-RightDisplay "번호" $wNo
     $hName = Pad-RightDisplay "자산명" $wName
     $hIP   = Pad-RightDisplay "IP주소" $wIP
@@ -659,27 +712,35 @@ function Show-AssetSummaryTable {
     $sepNote = "─" * $wNote
 
     # 헤더 및 구분선 출력
-    Write-Host (" " + $hNo + $gap + $hName + $gap + $hIP + $gap + $hAccs + $gap + $hURL + $gap + $hNote) -ForegroundColor DarkGray
-    Write-Host (" " + $sepNo + $gap + $sepName + $gap + $sepIP + $gap + $sepAccs + $gap + $sepURL + $gap + $sepNote) -ForegroundColor DarkGray
+    $headerLine = " " + $hNo + $gap + $hName + $gap + $hIP + $gap + $hAccs + $gap + $hURL + $gap + $hNote
+    $sepLine    = " " + $sepNo + $gap + $sepName + $gap + $sepIP + $gap + $sepAccs + $gap + $sepURL + $gap + $sepNote
+    
+    Write-Host (Truncate-DisplayString $headerLine $maxRowWidth) -ForegroundColor DarkGray
+    Write-Host (Truncate-DisplayString $sepLine $maxRowWidth) -ForegroundColor DarkGray
 
     # 데이터 행 출력
-    foreach ($r in $rows) {
-        $cNo   = Pad-RightDisplay $r.NoStr $wNo
-        $cName = Pad-RightDisplay $r.NameStr $wName
-        $cIP   = Pad-RightDisplay $r.IPStr $wIP
-        $cAccs = Pad-RightDisplay $r.AccSummary $wAccs
-        $cURL  = Pad-RightDisplay $r.URLStr $wURL
-        $cNote = Pad-RightDisplay $r.NoteStr $wNote
+    foreach ($r in $rawRows) {
+        $cNo   = Pad-RightDisplay (Truncate-DisplayString $r.NoStr $wNo) $wNo
+        $cName = Pad-RightDisplay (Truncate-DisplayString $r.NameStr $wName) $wName
+        $cIP   = Pad-RightDisplay (Truncate-DisplayString $r.IPStr $wIP) $wIP
+        $cAccs = Pad-RightDisplay (Truncate-DisplayString $r.AccSummary $wAccs) $wAccs
+        $cURL  = Pad-RightDisplay (Truncate-DisplayString $r.URLStr $wURL) $wURL
+        $cNote = Pad-RightDisplay (Truncate-DisplayString $r.NoteStr $wNote) $wNote
 
-        Write-Host (" " + $cNo + $gap + $cName + $gap + $cIP + $gap + $cAccs + $gap + $cURL + $gap + $cNote) -ForegroundColor White
+        $rowLine = " " + $cNo + $gap + $cName + $gap + $cIP + $gap + $cAccs + $gap + $cURL + $gap + $cNote
+        Write-Host (Truncate-DisplayString $rowLine $maxRowWidth) -ForegroundColor White
     }
 }
 
-# 15. 전체/검색 자산 목록 대화형 테이블 선택 함수 (위/아래 방향키 및 번호 선택 지원)
+# 15. 전체/검색 자산 목록 대화형 테이블 선택 함수 (위/아래 방향키 및 줄바꿈 방지 안전 출력)
 function Select-AssetFromTable {
     param([array]$AssetList)
 
     if (-not $AssetList -or $AssetList.Count -eq 0) { return $null }
+
+    $winWidth = 140
+    try { $winWidth = [Math]::Max(80, [Console]::WindowWidth) } catch {}
+    $maxRowWidth = $winWidth - 4
 
     # 헤더 텍스트 기본 너비
     $wNo   = Get-DisplayWidth "번호"
@@ -689,7 +750,7 @@ function Select-AssetFromTable {
     $wURL  = Get-DisplayWidth "접속URL"
     $wNote = Get-DisplayWidth "비고"
 
-    $rows = @()
+    $rawRows = @()
 
     for ($i = 0; $i -lt $AssetList.Count; $i++) {
         $a = $AssetList[$i]
@@ -714,7 +775,7 @@ function Select-AssetFromTable {
         $urlStr = if ($a.WebURL) { $a.WebURL } else { "-" }
         $noteStr = if ($a.Note) { $a.Note } else { "-" }
 
-        $rowItem = [PSCustomObject]@{
+        $rawRows += [PSCustomObject]@{
             NoStr      = $noStr
             NameStr    = $a.AssetName
             IPStr      = $a.IP
@@ -722,7 +783,6 @@ function Select-AssetFromTable {
             URLStr     = $urlStr
             NoteStr    = $noteStr
         }
-        $rows += $rowItem
 
         # 최대 너비 계산
         $wNo   = [Math]::Max($wNo, (Get-DisplayWidth $noStr))
@@ -732,6 +792,13 @@ function Select-AssetFromTable {
         $wURL  = [Math]::Max($wURL, (Get-DisplayWidth $urlStr))
         $wNote = [Math]::Max($wNote, (Get-DisplayWidth $noteStr))
     }
+
+    # 컬럼별 최대 상한선 적용 (창 너비 초과 방지)
+    $wName = [Math]::Min($wName, 22)
+    $wIP   = [Math]::Min($wIP, 16)
+    $wAccs = [Math]::Min($wAccs, 34)
+    $wURL  = [Math]::Min($wURL, 28)
+    $wNote = [Math]::Min($wNote, 24)
 
     $gap = "   "
 
@@ -749,11 +816,14 @@ function Select-AssetFromTable {
     $sepURL  = "─" * $wURL
     $sepNote = "─" * $wNote
 
-    Write-Host ("   " + $hNo + $gap + $hName + $gap + $hIP + $gap + $hAccs + $gap + $hURL + $gap + $hNote) -ForegroundColor DarkGray
-    Write-Host ("   " + $sepNo + $gap + $sepName + $gap + $sepIP + $gap + $sepAccs + $gap + $sepURL + $gap + $sepNote) -ForegroundColor DarkGray
+    $headerLine = "   " + $hNo + $gap + $hName + $gap + $hIP + $gap + $hAccs + $gap + $hURL + $gap + $hNote
+    $sepLine    = "   " + $sepNo + $gap + $sepName + $gap + $sepIP + $gap + $sepAccs + $gap + $sepURL + $gap + $sepNote
+
+    Write-Host (Truncate-DisplayString $headerLine $maxRowWidth) -ForegroundColor DarkGray
+    Write-Host (Truncate-DisplayString $sepLine $maxRowWidth) -ForegroundColor DarkGray
 
     $selectedIndex = 0
-    $count = $rows.Count
+    $count = $rawRows.Count
     $startTop = [Console]::CursorTop
 
     try { [Console]::CursorVisible = $false } catch {}
@@ -762,20 +832,27 @@ function Select-AssetFromTable {
         try { [Console]::SetCursorPosition(0, $startTop) } catch {}
 
         for ($i = 0; $i -lt $count; $i++) {
-            $r = $rows[$i]
+            $r = $rawRows[$i]
             $isSel = ($i -eq $selectedIndex)
 
             $prefix = if ($isSel) { " ▶ " } else { "   " }
             $fg = if ($isSel) { "Green" } else { "Gray" }
 
-            $cNo   = Pad-RightDisplay $r.NoStr $wNo
-            $cName = Pad-RightDisplay $r.NameStr $wName
-            $cIP   = Pad-RightDisplay $r.IPStr $wIP
-            $cAccs = Pad-RightDisplay $r.AccSummary $wAccs
-            $cURL  = Pad-RightDisplay $r.URLStr $wURL
-            $cNote = Pad-RightDisplay $r.NoteStr $wNote
+            $cNo   = Pad-RightDisplay (Truncate-DisplayString $r.NoStr $wNo) $wNo
+            $cName = Pad-RightDisplay (Truncate-DisplayString $r.NameStr $wName) $wName
+            $cIP   = Pad-RightDisplay (Truncate-DisplayString $r.IPStr $wIP) $wIP
+            $cAccs = Pad-RightDisplay (Truncate-DisplayString $r.AccSummary $wAccs) $wAccs
+            $cURL  = Pad-RightDisplay (Truncate-DisplayString $r.URLStr $wURL) $wURL
+            $cNote = Pad-RightDisplay (Truncate-DisplayString $r.NoteStr $wNote) $wNote
 
-            Write-Host ($prefix + $cNo + $gap + $cName + $gap + $cIP + $gap + $cAccs + $gap + $cURL + $gap + $cNote) -ForegroundColor $fg
+            $lineText = $prefix + $cNo + $gap + $cName + $gap + $cIP + $gap + $cAccs + $gap + $cURL + $gap + $cNote
+            $safeLine = Truncate-DisplayString $lineText $maxRowWidth
+            
+            # 이전 잔상을 지우기 위해 끝까지 공백 패딩 후 출력
+            $padEnd = $maxRowWidth - (Get-DisplayWidth $safeLine)
+            if ($padEnd -gt 0) { $safeLine += (" " * $padEnd) }
+
+            Write-Host $safeLine -ForegroundColor $fg
         }
 
         Write-Host "`n ───────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
@@ -865,6 +942,17 @@ function Show-AccountListTable {
         $wDesc = [Math]::Max($wDesc, (Get-DisplayWidth $descStr))
     }
 
+    # 컬럼별 최대 상한선 적용 (창 너비 초과 방지)
+    $wAcc  = [Math]::Min($wAcc, 16)
+    $wType = [Math]::Min($wType, 16)
+    $wID   = [Math]::Min($wID, 20)
+    $wPW   = [Math]::Min($wPW, 28)
+    $wDesc = [Math]::Min($wDesc, 34)
+
+    $winWidth = 140
+    try { $winWidth = [Math]::Max(80, [Console]::WindowWidth) } catch {}
+    $maxRowWidth = $winWidth - 4
+
     $gap = "   "
 
     $hNo   = Pad-RightDisplay "번호" $wNo
@@ -881,18 +969,22 @@ function Show-AccountListTable {
     $sepPW   = "─" * $wPW
     $sepDesc = "─" * $wDesc
 
-    Write-Host ("  " + $hNo + $gap + $hAcc + $gap + $hType + $gap + $hID + $gap + $hPW + $gap + $hDesc) -ForegroundColor DarkGray
-    Write-Host ("  " + $sepNo + $gap + $sepAcc + $gap + $sepType + $gap + $sepID + $gap + $sepPW + $gap + $sepDesc) -ForegroundColor DarkGray
+    $hLine = "  " + $hNo + $gap + $hAcc + $gap + $hType + $gap + $hID + $gap + $hPW + $gap + $hDesc
+    $sLine = "  " + $sepNo + $gap + $sepAcc + $gap + $sepType + $gap + $sepID + $gap + $sepPW + $gap + $sepDesc
+
+    Write-Host (Truncate-DisplayString $hLine $maxRowWidth) -ForegroundColor DarkGray
+    Write-Host (Truncate-DisplayString $sLine $maxRowWidth) -ForegroundColor DarkGray
 
     foreach ($r in $rows) {
-        $cNo   = Pad-RightDisplay $r.NoStr $wNo
-        $cAcc  = Pad-RightDisplay $r.AccStr $wAcc
-        $cType = Pad-RightDisplay $r.RoleStr $wType
-        $cID   = Pad-RightDisplay $r.IDStr $wID
-        $cPW   = Pad-RightDisplay $r.PWStr $wPW
-        $cDesc = Pad-RightDisplay $r.DescStr $wDesc
+        $cNo   = Pad-RightDisplay (Truncate-DisplayString $r.NoStr $wNo) $wNo
+        $cAcc  = Pad-RightDisplay (Truncate-DisplayString $r.AccStr $wAcc) $wAcc
+        $cType = Pad-RightDisplay (Truncate-DisplayString $r.RoleStr $wType) $wType
+        $cID   = Pad-RightDisplay (Truncate-DisplayString $r.IDStr $wID) $wID
+        $cPW   = Pad-RightDisplay (Truncate-DisplayString $r.PWStr $wPW) $wPW
+        $cDesc = Pad-RightDisplay (Truncate-DisplayString $r.DescStr $wDesc) $wDesc
 
-        Write-Host ("  " + $cNo + $gap + $cAcc + $gap + $cType + $gap + $cID + $gap + $cPW + $gap + $cDesc) -ForegroundColor White
+        $rLine = "  " + $cNo + $gap + $cAcc + $gap + $cType + $gap + $cID + $gap + $cPW + $gap + $cDesc
+        Write-Host (Truncate-DisplayString $rLine $maxRowWidth) -ForegroundColor White
     }
 }
 
