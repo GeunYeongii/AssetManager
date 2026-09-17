@@ -190,7 +190,23 @@ function Save-Assets {
     [System.IO.File]::WriteAllText($DataFile, $EncryptedText, [System.Text.UTF8Encoding]::new($false))
 }
 
-# 7. 한글 및 영문 너비 계산용 유틸리티
+# 7. 계정 중복 검사 함수 (root 및 동일 ID 중복 방지)
+function Test-AccountExists {
+    param(
+        [array]$Accounts,
+        [string]$CheckID
+    )
+    if (-not $Accounts -or $Accounts.Count -eq 0) { return $false }
+    $normCheck = $CheckID.Trim().ToLower()
+    foreach ($acc in $Accounts) {
+        if ($acc.ID.Trim().ToLower() -eq $normCheck) {
+            return $true
+        }
+    }
+    return $false
+}
+
+# 8. 한글 및 영문 너비 계산용 유틸리티
 function Get-DisplayWidth {
     param([string]$str)
     if ($null -eq $str) { return 0 }
@@ -222,7 +238,7 @@ function Pad-RightDisplay {
     return $str
 }
 
-# 8. UI 공통 배너
+# 9. UI 공통 배너
 function Show-Banner {
     param([string]$Title, [string]$Color = "Cyan")
     Write-Host " ╔═════════════════════════════════════════════════════════════╗" -ForegroundColor $Color
@@ -234,7 +250,7 @@ function Show-Banner {
     Write-Host " ╚═════════════════════════════════════════════════════════════╝`n" -ForegroundColor $Color
 }
 
-# 9. 사용자 입력 처리
+# 10. 사용자 입력 처리
 function Read-Input {
     param(
         [string]$PromptText,
@@ -254,7 +270,7 @@ function Read-Input {
     return $val
 }
 
-# 10. 프로그램 시작: 마스터 비밀번호 인증 및 세션 활성화
+# 11. 프로그램 시작: 마스터 비밀번호 인증 및 세션 활성화
 function Initialize-SessionAuth {
     Clear-Host
 
@@ -362,7 +378,7 @@ function Initialize-SessionAuth {
     exit
 }
 
-# 11. 마스터 비밀번호 변경
+# 12. 마스터 비밀번호 변경
 function Change-MasterPasswordFlow {
     try {
         Clear-Host
@@ -402,7 +418,7 @@ function Change-MasterPasswordFlow {
     }
 }
 
-# 12. 전체/검색 자산 요약 목록 출력 함수
+# 13. 전체/검색 자산 요약 목록 출력 함수
 function Show-AssetSummaryTable {
     param([array]$AssetList)
 
@@ -420,7 +436,6 @@ function Show-AssetSummaryTable {
         $a = $AssetList[$i]
         $noStr = ($i + 1).ToString()
 
-        # 등록 계정 요약 텍스트
         $accCount = if ($a.Accounts) { $a.Accounts.Count } else { 0 }
         $accSummary = "계정 없음 (0)"
         if ($accCount -eq 1) {
@@ -444,7 +459,7 @@ function Show-AssetSummaryTable {
     }
 }
 
-# 13. 자산 검색 (다중 계정 ID/타입/설명까지 검색)
+# 14. 자산 검색 (다중 계정 ID/타입/설명까지 검색)
 function Search-Assets {
     param([array]$AllAssets, [string]$Keyword)
     $isIPLike = $Keyword -match '^[\d\.\:]+$'
@@ -471,7 +486,50 @@ function Search-Assets {
     return @($results)
 }
 
-# 14. 자산 상세 정보 및 하위 계정 관리 화면
+# 15. 단일 계정 정보 입력 헬퍼 (중복 검사 포함)
+function Read-NewAccountInput {
+    param(
+        [array]$ExistingAccounts,
+        [string]$HeaderMessage = "새 계정 정보 입력"
+    )
+    Write-Host "`n [ $HeaderMessage ] ('q' 입력 시 취소)" -ForegroundColor Cyan
+    
+    # 계정 ID 입력 및 중복 체크 루프
+    $accID = ""
+    while ($true) {
+        $accID = Read-Input " ▶ 계정 ID (예: root, admin, devuser 등)"
+        
+        if (Test-AccountExists -Accounts $ExistingAccounts -CheckID $accID) {
+            if ($accID.ToLower() -eq "root") {
+                Write-Host " [!] 이미 'root' 계정이 등록되어 있어 다시 추가할 수 없습니다.`n" -ForegroundColor Red
+            } else {
+                Write-Host " [!] 이미 '$accID' 계정이 등록되어 있습니다. 다른 ID를 입력하세요.`n" -ForegroundColor Red
+            }
+            continue
+        }
+        break
+    }
+
+    # 계정 구분/역할 기본값 제안 (ID가 root면 기본 role을 root로)
+    $defaultRolePrompt = if ($accID.ToLower() -eq "root") { " ▶ 계정 구분/역할 [root]" } else { " ▶ 계정 구분/역할 (예: root, admin, webuser, dev 등)" }
+    $accType = Read-Input $defaultRolePrompt -AllowEmpty ($accID.ToLower() -eq "root")
+    if ([string]::IsNullOrWhiteSpace($accType) -and $accID.ToLower() -eq "root") {
+        $accType = "root"
+    }
+
+    $accPW   = Read-Input " ▶ 패스워드"
+    $accDesc = Read-Input " ▶ 계정 설명/메모 (선택, 없을 시 Enter)" -AllowEmpty $true
+
+    return [PSCustomObject]@{
+        AccountID   = [guid]::NewGuid().ToString()
+        AccountType = $accType
+        ID          = $accID
+        PW          = $accPW
+        Description = $accDesc
+    }
+}
+
+# 16. 자산 상세 정보 및 하위 계정 관리 화면
 function Show-AssetDetailManage {
     param([string]$AssetID)
 
@@ -542,19 +600,7 @@ function Show-AssetDetailManage {
             # ── 1. 계정 추가 ──
             '1' {
                 try {
-                    Write-Host "`n [ 새 계정 추가 ] ('q' 입력 시 취소)" -ForegroundColor Cyan
-                    $inType = Read-Input " ▶ 계정 구분/역할 (예: root, admin, webuser, dev 등)"
-                    $inID   = Read-Input " ▶ 계정 ID"
-                    $inPW   = Read-Input " ▶ 패스워드"
-                    $inDesc = Read-Input " ▶ 계정 설명/메모" -AllowEmpty $true
-
-                    $newAcc = [PSCustomObject]@{
-                        AccountID   = [guid]::NewGuid().ToString()
-                        AccountType = $inType
-                        ID          = $inID
-                        PW          = $inPW
-                        Description = $inDesc
-                    }
+                    $newAcc = Read-NewAccountInput -ExistingAccounts $targetAsset.Accounts -HeaderMessage "새 계정 추가"
 
                     for ($i = 0; $i -lt $allAssets.Count; $i++) {
                         if ($allAssets[$i].AssetID -eq $AssetID) {
@@ -591,8 +637,19 @@ function Show-AssetDetailManage {
 
                     $targetAcc = $accList[$idx]
                     Write-Host "`n [*] 수정할 값을 입력하세요. (기존 유지 시 Enter, 취소 시 q)" -ForegroundColor Cyan
+                    
+                    $uID = Read-Input " ▶ 계정 ID [$($targetAcc.ID)]" -IsEditMode $true
+                    if ($uID -and $uID.ToLower() -ne $targetAcc.ID.ToLower()) {
+                        # ID 변경 시 중복 검사
+                        $otherAccounts = @($targetAsset.Accounts | Where-Object { $_.AccountID -ne $targetAcc.AccountID })
+                        if (Test-AccountExists -Accounts $otherAccounts -CheckID $uID) {
+                            Write-Host "`n [!] 이미 '$uID' 계정이 등록되어 있어 해당 ID로 변경할 수 없습니다." -ForegroundColor Red
+                            Start-Sleep -Seconds 1
+                            break
+                        }
+                    }
+
                     $uType = Read-Input " ▶ 계정 구분 [$($targetAcc.AccountType)]" -IsEditMode $true
-                    $uID   = Read-Input " ▶ 계정 ID [$($targetAcc.ID)]" -IsEditMode $true
                     $uPW   = Read-Input " ▶ 패스워드 [********]" -IsEditMode $true
                     $uDesc = Read-Input " ▶ 계정 설명 [$($targetAcc.Description)]" -IsEditMode $true
 
@@ -600,8 +657,8 @@ function Show-AssetDetailManage {
                         if ($allAssets[$i].AssetID -eq $AssetID) {
                             for ($j = 0; $j -lt $allAssets[$i].Accounts.Count; $j++) {
                                 if ($allAssets[$i].Accounts[$j].AccountID -eq $targetAcc.AccountID) {
-                                    if ($uType) { $allAssets[$i].Accounts[$j].AccountType = $uType }
                                     if ($uID)   { $allAssets[$i].Accounts[$j].ID = $uID }
+                                    if ($uType) { $allAssets[$i].Accounts[$j].AccountType = $uType }
                                     if ($uPW)   { $allAssets[$i].Accounts[$j].PW = $uPW }
                                     if ($uDesc) { $allAssets[$i].Accounts[$j].Description = $uDesc }
                                     break
@@ -674,11 +731,11 @@ function Show-AssetDetailManage {
 }
 
 # ─────────────────────────────────────────────────────────────
-# 15. 프로그램 시작: 세션 인증
+# 17. 메인 프로그램 시작: 세션 인증
 # ─────────────────────────────────────────────────────────────
 Initialize-SessionAuth
 
-# 16. 메인 메뉴 루프
+# 18. 메인 메뉴 루프
 while ($true) {
     Clear-Host
     Show-Banner -Title "AssetManager" -Color "Cyan"
@@ -763,83 +820,124 @@ while ($true) {
             }
         }
 
-        # ── 3. 새 자산 추가 ──
+        # ── 3. 자산 추가 (IP 선입력 & 기존 자산 자동 매칭) ──
         '3' { 
             try {
                 Clear-Host
-                Show-Banner -Title "새 자산 추가" -Color "Yellow"
+                Show-Banner -Title "자 산 추 가" -Color "Yellow"
                 Write-Host " [*] 취소하려면 언제든 'q'를 입력하거나 빈칸에서 Enter를 누르세요.`n" -ForegroundColor Gray
                 
-                $inputName = Read-Input " ▶ 1. 자산 이름 (예: 운영 DB서버, 웹서버01 등)"
-                $inputIP   = Read-Input " ▶ 2. IP 주소"
+                # 1단계: IP 주소 먼저 입력
+                $inputIP = Read-Input " ▶ 1. IP 주소 입력"
 
-                # IP가 이미 있는 경우 알림 (다중 등록 허용 여부 안내)
-                $duplicate = $assets | Where-Object { $_.IP -eq $inputIP }
-                if ($duplicate) {
-                    Write-Host "`n [!] 알림: 동일한 IP($inputIP)를 사용하는 자산이 이미 존재합니다: '$($duplicate.AssetName)'" -ForegroundColor Yellow
-                    $proceed = Read-Input " ▶ 그래도 별도 자산으로 추가하시겠습니까? (Y/N)" -AllowEmpty $true
-                    if ($proceed -notmatch '^[Yy]$') {
-                        Write-Host " [!] 자산 추가가 취소되었습니다. 기존 자산에 계정을 추가하려면 [2]번 조회를 이용하세요." -ForegroundColor Yellow
+                # 기존에 등록된 IP 자산 검색
+                $existingAsset = $assets | Where-Object { $_.IP.Trim() -eq $inputIP.Trim() }
+
+                if ($existingAsset) {
+                    # ── CASE A: 이미 등록된 IP인 경우 ──
+                    Write-Host "`n [!] 이미 등록된 IP 자산을 발견했습니다!" -ForegroundColor Green
+                    Write-Host " ───────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
+                    Write-Host "  * 자산명 : $($existingAsset.AssetName)" -ForegroundColor White
+                    Write-Host "  * IP 주소: $($existingAsset.IP)" -ForegroundColor White
+                    Write-Host "  * 접속URL: $($existingAsset.WebURL)" -ForegroundColor White
+                    Write-Host "  * 비고   : $($existingAsset.Note)" -ForegroundColor White
+                    
+                    $currAccounts = @($existingAsset.Accounts)
+                    $accSummaryStr = ""
+                    if ($currAccounts.Count -eq 0) {
+                        $accSummaryStr = "등록된 계정 없음"
+                    } else {
+                        $accNames = $currAccounts | ForEach-Object { "$($_.ID)($($_.AccountType))" }
+                        $accSummaryStr = $accNames -join ", "
+                    }
+                    Write-Host "  * 현재 등록된 계정 ($($currAccounts.Count)개): $accSummaryStr" -ForegroundColor Yellow
+                    Write-Host " ───────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
+
+                    $isCorrect = Read-Input " ▶ 이 자산이 맞습니까? (Y/N)" -AllowEmpty $true
+                    if ($isCorrect -notmatch '^[Yy]$') {
+                        Write-Host "`n [-] 자산 추가가 취소되었습니다." -ForegroundColor Yellow
                         $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
                         break
                     }
-                }
 
-                $inputURL  = Read-Input " ▶ 3. 접속 URL (포트 포함, 없을 시 Enter)" -AllowEmpty $true
-                $inputNote = Read-Input " ▶ 4. 비고 / 메모 (없을 시 Enter)" -AllowEmpty $true
-
-                # 첫 번째 계정 등록
-                Write-Host "`n [ 첫 번째 계정 정보 등록 ]" -ForegroundColor Cyan
-                $accType = Read-Input " ▶ 5. 계정 구분/역할 (예: root, admin, user 등)"
-                $accID   = Read-Input " ▶ 6. 계정 ID"
-                $accPW   = Read-Input " ▶ 7. 패스워드"
-                $accDesc = Read-Input " ▶ 8. 계정 설명 (선택, 없을 시 Enter)" -AllowEmpty $true
-
-                $newAccounts = @(
-                    [PSCustomObject]@{
-                        AccountID   = [guid]::NewGuid().ToString()
-                        AccountType = $accType
-                        ID          = $accID
-                        PW          = $accPW
-                        Description = $accDesc
-                    }
-                )
-
-                # 추가 계정 연속 등록 여부
-                while ($true) {
-                    Write-Host ""
-                    $more = Read-Input " ▶ 이 자산에 계정을 더 추가하시겠습니까? (Y/N)" -AllowEmpty $true
-                    if ($more -match '^[Yy]$') {
-                        Write-Host "`n [ 추가 계정 등록 ]" -ForegroundColor Cyan
-                        $mType = Read-Input " ▶ 계정 구분/역할 (예: admin, devuser 등)"
-                        $mID   = Read-Input " ▶ 계정 ID"
-                        $mPW   = Read-Input " ▶ 패스워드"
-                        $mDesc = Read-Input " ▶ 계정 설명 (선택)" -AllowEmpty $true
-                        $newAccounts += [PSCustomObject]@{
-                            AccountID   = [guid]::NewGuid().ToString()
-                            AccountType = $mType
-                            ID          = $mID
-                            PW          = $mPW
-                            Description = $mDesc
+                    Write-Host "`n [*] '$($existingAsset.AssetName)' 자산에 새 계정을 추가합니다. (접속URL 등은 자동 유지됩니다)" -ForegroundColor Cyan
+                    
+                    # 추가 메모가 필요한 경우 기존 비고에 덧붙이기 지원
+                    $extraNote = Read-Input " ▶ 추가할 비고/메모 (기존 유지 시 Enter)" -AllowEmpty $true -IsEditMode $true
+                    if ($extraNote) {
+                        for ($i = 0; $i -lt $assets.Count; $i++) {
+                            if ($assets[$i].AssetID -eq $existingAsset.AssetID) {
+                                if ([string]::IsNullOrWhiteSpace($assets[$i].Note)) {
+                                    $assets[$i].Note = $extraNote
+                                } else {
+                                    $assets[$i].Note += " / $extraNote"
+                                }
+                                break
+                            }
                         }
-                    } else {
-                        break
                     }
-                }
 
-                $newAsset = [PSCustomObject]@{
-                    AssetID   = [guid]::NewGuid().ToString()
-                    AssetName = $inputName
-                    IP        = $inputIP
-                    WebURL    = $inputURL
-                    Note      = $inputNote
-                    Accounts  = $newAccounts
-                }
+                    # 계정 추가 루프
+                    $addedCount = 0
+                    while ($true) {
+                        # 현재 최신 자산의 계정 목록 가져오기
+                        $targetForAcc = $assets | Where-Object { $_.AssetID -eq $existingAsset.AssetID }
+                        $newAcc = Read-NewAccountInput -ExistingAccounts $targetForAcc.Accounts -HeaderMessage "추가할 계정 정보 입력"
+                        
+                        for ($i = 0; $i -lt $assets.Count; $i++) {
+                            if ($assets[$i].AssetID -eq $existingAsset.AssetID) {
+                                $assets[$i].Accounts += $newAcc
+                                break
+                            }
+                        }
+                        $addedCount++
+                        Save-Assets -Assets $assets
+                        Write-Host "`n [v] '$($newAcc.ID)' 계정이 성공적으로 추가되었습니다!" -ForegroundColor Green
 
-                $assets += $newAsset
-                Save-Assets -Assets $assets
-                Write-Host "`n [v] 자산 및 계정 $($newAccounts.Count)개가 성공적으로 등록되었습니다!" -ForegroundColor Green
-                $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
+                        $more = Read-Input "`n ▶ 이 자산에 계정을 더 추가하시겠습니까? (Y/N)" -AllowEmpty $true
+                        if ($more -notmatch '^[Yy]$') {
+                            break
+                        }
+                    }
+
+                    Write-Host "`n [v] 총 $addedCount 개의 계정이 추가 완료되었습니다." -ForegroundColor Green
+                    $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
+                } else {
+                    # ── CASE B: 신규 IP인 경우 ──
+                    $inputName = Read-Input " ▶ 2. 자산 이름 (예: 운영 DB서버, 웹서버01 등)"
+                    $inputURL  = Read-Input " ▶ 3. 접속 URL (포트 포함, 없을 시 Enter)" -AllowEmpty $true
+                    $inputNote = Read-Input " ▶ 4. 비고 / 메모 (없을 시 Enter)" -AllowEmpty $true
+
+                    # 첫 번째 계정 등록
+                    $newAccounts = @()
+                    $firstAcc = Read-NewAccountInput -ExistingAccounts $newAccounts -HeaderMessage "첫 번째 계정 정보 등록"
+                    $newAccounts += $firstAcc
+
+                    # 추가 계정 연속 등록 여부
+                    while ($true) {
+                        $more = Read-Input "`n ▶ 이 자산에 계정을 더 추가하시겠습니까? (Y/N)" -AllowEmpty $true
+                        if ($more -match '^[Yy]$') {
+                            $nextAcc = Read-NewAccountInput -ExistingAccounts $newAccounts -HeaderMessage "추가 계정 정보 등록"
+                            $newAccounts += $nextAcc
+                        } else {
+                            break
+                        }
+                    }
+
+                    $newAsset = [PSCustomObject]@{
+                        AssetID   = [guid]::NewGuid().ToString()
+                        AssetName = $inputName
+                        IP        = $inputIP
+                        WebURL    = $inputURL
+                        Note      = $inputNote
+                        Accounts  = $newAccounts
+                    }
+
+                    $assets += $newAsset
+                    Save-Assets -Assets $assets
+                    Write-Host "`n [v] 새 자산 '$inputName' 및 계정 $($newAccounts.Count)개가 성공적으로 등록되었습니다!" -ForegroundColor Green
+                    $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
+                }
             } catch {
                 if ($_.Exception.Message -eq "CANCEL_ACTION") {
                     Write-Host "`n [-] 자산 추가가 취소되어 메인 메뉴로 돌아갑니다." -ForegroundColor Yellow
