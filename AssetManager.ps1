@@ -1167,11 +1167,10 @@ while ($true) {
                     while ($true) {
                         $more = Read-Input "`n ▶ 이 자산에 계정을 더 추가하시겠습니까? (Y/N)" -AllowEmpty $true
                         if ($more -notmatch '^[Yy]$') {
-                            $nextAcc = Read-NewAccountInput -ExistingAccounts $newAccounts -HeaderMessage "추가 계정 정보 등록"
-                            $newAccounts += $nextAcc
-                        } else {
                             break
                         }
+                        $nextAcc = Read-NewAccountInput -ExistingAccounts $newAccounts -HeaderMessage "추가 계정 정보 등록"
+                        $newAccounts += $nextAcc
                     }
 
                     $newAsset = [PSCustomObject]@{
