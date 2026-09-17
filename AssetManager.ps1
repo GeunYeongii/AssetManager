@@ -127,7 +127,6 @@ function Read-MaskedInput {
         }
     }
     
-    # 수정 모드가 아닐 때 q 단독 입력 시 취소
     if (-not $IsEditMode -and ($pwd -eq 'q' -or $pwd -eq 'Q' -or $pwd -eq 'ㅂ')) {
         throw [System.Exception]::new("CANCEL_ACTION")
     }
@@ -144,10 +143,14 @@ function Normalize-Asset {
             $accessType = if ($acc.PSObject.Properties['AccessType'] -and $acc.AccessType) { [string]$acc.AccessType } else { "CLI" }
             $accId = [string]$acc.ID
             
-            # 윈도우 administrator 또는 root ID는 역할을 root로 정규화
-            $role = if ($acc.AccountType) { [string]$acc.AccountType } else { "일반" }
-            if ($accId.ToLower() -eq "root" -or $accId.ToLower() -eq "administrator") {
-                $role = "root"
+            # GUI 계정은 역할 개념이 없으므로 "-"로 처리
+            $role = "-"
+            if ($accessType.ToUpper() -eq "CLI") {
+                if ($accId.ToLower() -eq "root" -or $accId.ToLower() -eq "administrator") {
+                    $role = "root"
+                } else {
+                    $role = if ($acc.AccountType -and $acc.AccountType -ne "-") { [string]$acc.AccountType } else { "일반" }
+                }
             }
 
             $accList += [PSCustomObject]@{
@@ -235,15 +238,17 @@ function Test-AccountExists {
     return $false
 }
 
-# 8. 자산 전체에서 단일 고유 root 역할 보유 여부 검사 함수
-function Test-HasRootRole {
+# 8. CLI 계정 전체에서 root 역할 존재 여부 검사 함수
+function Test-HasCliRootRole {
     param([array]$Accounts)
     if (-not $Accounts -or $Accounts.Count -eq 0) { return $false }
     foreach ($acc in $Accounts) {
-        $idLower = $acc.ID.Trim().ToLower()
-        $roleLower = $acc.AccountType.Trim().ToLower()
-        if ($roleLower -eq "root" -or $idLower -eq "root" -or $idLower -eq "administrator") {
-            return $true
+        if ($acc.AccessType.ToUpper() -eq "CLI") {
+            $idLower = $acc.ID.Trim().ToLower()
+            $roleLower = $acc.AccountType.Trim().ToLower()
+            if ($roleLower -eq "root" -or $idLower -eq "root" -or $idLower -eq "administrator") {
+                return $true
+            }
         }
     }
     return $false
@@ -538,7 +543,7 @@ function Search-Assets {
     return @($results)
 }
 
-# 16. 단일 계정 정보 입력 헬퍼 (CLI/GUI 선택 + root 역할 단일 고유화 + 패스워드 * 마스킹)
+# 16. 단일 계정 정보 입력 헬퍼 (CLI는 root/일반 관리, GUI는 역할 미사용)
 function Read-NewAccountInput {
     param(
         [array]$ExistingAccounts,
@@ -557,48 +562,59 @@ function Read-NewAccountInput {
         $accessType = "GUI"
     }
 
-    # 자산 전체에 root(관리자) 역할이 이미 존재하는지 확인
-    $hasRootRole = Test-HasRootRole -Accounts $ExistingAccounts
+    $accRole = "-"
 
-    # 2. 계정 ID 입력 및 중복 체크 루프
-    $accID = ""
-    while ($true) {
-        $accID = Read-Input " ▶ 계정 ID"
-        $normId = $accID.ToLower()
-
-        # 이미 root 역할이 있는데 root 또는 administrator를 또 추가하려는 경우 차단
-        if (($normId -eq "root" -or $normId -eq "administrator") -and $hasRootRole) {
-            Write-Host " [!] 이미 해당 자산에 root(관리자) 계정이 등록되어 있습니다. 일반 계정 ID를 입력하세요.`n" -ForegroundColor Red
-            continue
+    if ($accessType -eq "GUI") {
+        # ── GUI 웹콘솔 계정 입력 (역할 개념 없음) ──
+        $accID = ""
+        while ($true) {
+            $accID = Read-Input " ▶ 계정 ID"
+            if (Test-AccountExists -Accounts $ExistingAccounts -AccessType "GUI" -CheckID $accID) {
+                Write-Host " [!] [GUI]에 이미 '$accID' 계정이 등록되어 있습니다. 다른 ID를 입력하세요.`n" -ForegroundColor Red
+                continue
+            }
+            break
         }
-        
-        if (Test-AccountExists -Accounts $ExistingAccounts -AccessType $accessType -CheckID $accID) {
-            Write-Host " [!] [$accessType]에 이미 '$accID' 계정이 등록되어 있습니다. 다른 ID를 입력하세요.`n" -ForegroundColor Red
-            continue
-        }
-        break
-    }
-
-    # 3. 계정 구분/역할(Role) 결정
-    $accRole = ""
-    if ($accID.ToLower() -eq "root" -or $accID.ToLower() -eq "administrator") {
-        # root 또는 administrator ID는 역할을 root로 고정
-        $accRole = "root"
-    } elseif ($hasRootRole) {
-        # 이미 자산에 root가 존재하면 역할은 자동으로 '일반'으로 고정 (입력 생략)
-        $accRole = "일반"
-        Write-Host " [*] 이미 관리자(root) 계정이 존재하여 계정 역할이 자동으로 '일반'으로 지정됩니다." -ForegroundColor DarkGray
+        $accRole = "-"
     } else {
-        # 아직 root가 없는 자산이면 역할 입력 받음
-        $inRole = Read-Input " ▶ 계정 구분/역할" -AllowEmpty $true
-        if ([string]::IsNullOrWhiteSpace($inRole)) {
+        # ── CLI 원격/콘솔 계정 입력 (root 고유성 관리) ──
+        $hasCliRoot = Test-HasCliRootRole -Accounts $ExistingAccounts
+
+        $accID = ""
+        while ($true) {
+            $accID = Read-Input " ▶ 계정 ID"
+            $normId = $accID.ToLower()
+
+            # CLI에 이미 root가 있는데 root 또는 administrator 추가 시도시 차단
+            if (($normId -eq "root" -or $normId -eq "administrator") -and $hasCliRoot) {
+                Write-Host " [!] [CLI]에 이미 root(관리자) 계정이 등록되어 있습니다. 일반 계정 ID를 입력하세요.`n" -ForegroundColor Red
+                continue
+            }
+            
+            if (Test-AccountExists -Accounts $ExistingAccounts -AccessType "CLI" -CheckID $accID) {
+                Write-Host " [!] [CLI]에 이미 '$accID' 계정이 등록되어 있습니다. 다른 ID를 입력하세요.`n" -ForegroundColor Red
+                continue
+            }
+            break
+        }
+
+        # CLI 역할 결정
+        if ($accID.ToLower() -eq "root" -or $accID.ToLower() -eq "administrator") {
+            $accRole = "root"
+        } elseif ($hasCliRoot) {
             $accRole = "일반"
+            Write-Host " [*] [CLI]에 이미 관리자(root) 계정이 존재하여 역할이 자동으로 '일반'으로 지정됩니다." -ForegroundColor DarkGray
         } else {
-            $accRole = $inRole
+            $inRole = Read-Input " ▶ 계정 구분/역할" -AllowEmpty $true
+            if ([string]::IsNullOrWhiteSpace($inRole)) {
+                $accRole = "일반"
+            } else {
+                $accRole = $inRole
+            }
         }
     }
 
-    # 4. 패스워드 입력 (* 마스킹 입력)
+    # 패스워드 입력 (* 마스킹)
     $accPW = Read-MaskedInput -PromptText " ▶ 패스워드"
     $accDesc = Read-Input " ▶ 계정 설명/메모" -AllowEmpty $true
 
@@ -655,7 +671,9 @@ function Show-AssetDetailManage {
                 $acc = $accList[$i]
                 $noStr = ($i + 1).ToString()
                 $accTypeStr = if ($acc.AccessType) { "[$($acc.AccessType)]" } else { "[CLI]" }
-                $roleStr = if ($acc.AccountType) { "[$($acc.AccountType)]" } else { "[-]" }
+                
+                # GUI 계정은 역할이 없으므로 [-] 표시
+                $roleStr = if ($acc.AccessType.ToUpper() -eq "GUI") { "[-]" } elseif ($acc.AccountType -and $acc.AccountType -ne "-") { "[$($acc.AccountType)]" } else { "[-]" }
 
                 $cNo   = Pad-RightDisplay $noStr 6
                 $cAcc  = Pad-RightDisplay $accTypeStr 10
@@ -717,13 +735,13 @@ function Show-AssetDetailManage {
                     }
 
                     $targetAcc = $accList[$idx]
-                    $isRootAcc = ($targetAcc.AccountType.ToLower() -eq "root" -or $targetAcc.ID.ToLower() -eq "root" -or $targetAcc.ID.ToLower() -eq "administrator")
+                    $isCliRoot = ($targetAcc.AccessType.ToUpper() -eq "CLI" -and ($targetAcc.AccountType.ToLower() -eq "root" -or $targetAcc.ID.ToLower() -eq "root" -or $targetAcc.ID.ToLower() -eq "administrator"))
 
                     Write-Host "`n [*] 수정할 값을 입력하세요. (기존 유지 시 Enter, 취소 시 q)" -ForegroundColor Cyan
 
-                    if ($isRootAcc) {
-                        # root 계정인 경우 ID/역할은 고정 안내 후 패스워드와 설명만 입력
-                        Write-Host " [*] 관리자(root) 계정 수정 모드입니다. 계정 ID와 역할([root])은 자동 유지됩니다." -ForegroundColor Yellow
+                    if ($isCliRoot) {
+                        # CLI root 계정 수정
+                        Write-Host " [*] CLI 관리자(root) 계정 수정 모드입니다. 계정 ID와 역할([root])은 자동 유지됩니다." -ForegroundColor Yellow
                         
                         $uPW = Read-MaskedInput -PromptText " ▶ 변경할 패스워드 (기존 유지 시 Enter)" -IsEditMode $true
                         $uDesc = Read-Input " ▶ 계정 설명/메모 [$($targetAcc.Description)]" -IsEditMode $true
@@ -740,28 +758,54 @@ function Show-AssetDetailManage {
                                 break
                             }
                         }
-                    } else {
-                        # 일반 계정 수정 모드
-                        $uAccess = Read-Input " ▶ 접속 유형 [CLI/GUI] [$($targetAcc.AccessType)]" -IsEditMode $true
-                        $finalAccess = if ($uAccess) { $uAccess.ToUpper() } else { $targetAcc.AccessType }
-
+                    } elseif ($targetAcc.AccessType.ToUpper() -eq "GUI") {
+                        # GUI 계정 수정 (역할 개념 없음)
                         $uID = Read-Input " ▶ 계정 ID [$($targetAcc.ID)]" -IsEditMode $true
                         $finalID = if ($uID) { $uID } else { $targetAcc.ID }
 
-                        # 일반 계정을 root나 administrator로 변경하려는 경우 체크
-                        if ($finalID.ToLower() -eq "root" -or $finalID.ToLower() -eq "administrator") {
-                            $hasRootAlready = Test-HasRootRole -Accounts @($targetAsset.Accounts | Where-Object { $_.AccountID -ne $targetAcc.AccountID })
-                            if ($hasRootAlready) {
-                                Write-Host "`n [!] 이미 root(관리자) 계정이 존재하므로 일반 계정을 root로 변경할 수 없습니다." -ForegroundColor Red
+                        if ($uID) {
+                            $otherAccounts = @($targetAsset.Accounts | Where-Object { $_.AccountID -ne $targetAcc.AccountID })
+                            if (Test-AccountExists -Accounts $otherAccounts -AccessType "GUI" -CheckID $finalID) {
+                                Write-Host "`n [!] [GUI]에 이미 '$finalID' 계정이 등록되어 있어 변경할 수 없습니다." -ForegroundColor Red
                                 Start-Sleep -Seconds 1
                                 break
                             }
                         }
 
-                        if ($uID -or $uAccess) {
+                        $uPW   = Read-MaskedInput -PromptText " ▶ 패스워드 (기존 유지 시 Enter)" -IsEditMode $true
+                        $uDesc = Read-Input " ▶ 계정 설명/메모 [$($targetAcc.Description)]" -IsEditMode $true
+
+                        for ($i = 0; $i -lt $allAssets.Count; $i++) {
+                            if ($allAssets[$i].AssetID -eq $AssetID) {
+                                for ($j = 0; $j -lt $allAssets[$i].Accounts.Count; $j++) {
+                                    if ($allAssets[$i].Accounts[$j].AccountID -eq $targetAcc.AccountID) {
+                                        if ($uID)   { $allAssets[$i].Accounts[$j].ID = $finalID }
+                                        if ($uPW)   { $allAssets[$i].Accounts[$j].PW = $uPW }
+                                        if ($uDesc) { $allAssets[$i].Accounts[$j].Description = $uDesc }
+                                        break
+                                    }
+                                }
+                                break
+                            }
+                        }
+                    } else {
+                        # CLI 일반 계정 수정
+                        $uID = Read-Input " ▶ 계정 ID [$($targetAcc.ID)]" -IsEditMode $true
+                        $finalID = if ($uID) { $uID } else { $targetAcc.ID }
+
+                        if ($finalID.ToLower() -eq "root" -or $finalID.ToLower() -eq "administrator") {
+                            $hasRootAlready = Test-HasCliRootRole -Accounts @($targetAsset.Accounts | Where-Object { $_.AccountID -ne $targetAcc.AccountID })
+                            if ($hasRootAlready) {
+                                Write-Host "`n [!] [CLI]에 이미 root 계정이 존재하므로 일반 계정을 root로 변경할 수 없습니다." -ForegroundColor Red
+                                Start-Sleep -Seconds 1
+                                break
+                            }
+                        }
+
+                        if ($uID) {
                             $otherAccounts = @($targetAsset.Accounts | Where-Object { $_.AccountID -ne $targetAcc.AccountID })
-                            if (Test-AccountExists -Accounts $otherAccounts -AccessType $finalAccess -CheckID $finalID) {
-                                Write-Host "`n [!] [$finalAccess]에 이미 '$finalID' 계정이 등록되어 있어 변경할 수 없습니다." -ForegroundColor Red
+                            if (Test-AccountExists -Accounts $otherAccounts -AccessType "CLI" -CheckID $finalID) {
+                                Write-Host "`n [!] [CLI]에 이미 '$finalID' 계정이 등록되어 있어 변경할 수 없습니다." -ForegroundColor Red
                                 Start-Sleep -Seconds 1
                                 break
                             }
@@ -775,11 +819,10 @@ function Show-AssetDetailManage {
                             if ($allAssets[$i].AssetID -eq $AssetID) {
                                 for ($j = 0; $j -lt $allAssets[$i].Accounts.Count; $j++) {
                                     if ($allAssets[$i].Accounts[$j].AccountID -eq $targetAcc.AccountID) {
-                                        if ($uAccess) { $allAssets[$i].Accounts[$j].AccessType = $finalAccess }
-                                        if ($uID)     { $allAssets[$i].Accounts[$j].ID = $finalID }
-                                        if ($uRole)   { $allAssets[$i].Accounts[$j].AccountType = $uRole }
-                                        if ($uPW)     { $allAssets[$i].Accounts[$j].PW = $uPW }
-                                        if ($uDesc)   { $allAssets[$i].Accounts[$j].Description = $uDesc }
+                                        if ($uID)   { $allAssets[$i].Accounts[$j].ID = $finalID }
+                                        if ($uRole) { $allAssets[$i].Accounts[$j].AccountType = $uRole }
+                                        if ($uPW)   { $allAssets[$i].Accounts[$j].PW = $uPW }
+                                        if ($uDesc) { $allAssets[$i].Accounts[$j].Description = $uDesc }
                                         break
                                     }
                                 }
@@ -816,7 +859,8 @@ function Show-AssetDetailManage {
                     }
 
                     $targetAcc = $accList[$idx]
-                    $confirm = Read-Input " ▶ '[$($targetAcc.AccessType)][$($targetAcc.AccountType)] $($targetAcc.ID)' 계정을 삭제하시겠습니까? (Y/N)" -AllowEmpty $true
+                    $roleLabel = if ($targetAcc.AccessType.ToUpper() -eq "GUI") { "" } else { "[$($targetAcc.AccountType)] " }
+                    $confirm = Read-Input " ▶ '[$($targetAcc.AccessType)] $roleLabel$($targetAcc.ID)' 계정을 삭제하시겠습니까? (Y/N)" -AllowEmpty $true
                     if ($confirm -match '^[Yy]$') {
                         for ($i = 0; $i -lt $allAssets.Count; $i++) {
                             if ($allAssets[$i].AssetID -eq $AssetID) {
@@ -963,7 +1007,9 @@ while ($true) {
                     if ($currAccounts.Count -eq 0) {
                         $accSummaryStr = "등록된 계정 없음"
                     } else {
-                        $accNames = $currAccounts | ForEach-Object { "$($_.AccessType):$($_.ID)($($_.AccountType))" }
+                        $accNames = $currAccounts | ForEach-Object { 
+                            if ($_.AccessType.ToUpper() -eq "GUI") { "GUI:$($_.ID)" } else { "CLI:$($_.ID)($($_.AccountType))" }
+                        }
                         $accSummaryStr = $accNames -join ", "
                     }
                     Write-Host "  * 현재 등록된 계정 ($($currAccounts.Count)개): $accSummaryStr" -ForegroundColor Yellow
@@ -1124,11 +1170,11 @@ while ($true) {
             }
         }
 
-        # ── 5. 자산 삭제 ──
+        # ── 5. 자산 / 계정 삭제 (선택적 삭제 지원) ──
         '5' { 
             try {
                 Clear-Host
-                Show-Banner -Title "자 산 삭 제" -Color "Red"
+                Show-Banner -Title "자산 / 계정 삭제" -Color "Red"
                 Write-Host " [*] 취소하려면 언제든 'q'를 입력하거나 빈칸에서 Enter를 누르세요.`n" -ForegroundColor Gray
                 
                 if ($assets.Count -eq 0) {
@@ -1149,7 +1195,7 @@ while ($true) {
                 Show-AssetSummaryTable -AssetList $results
                 Write-Host ""
 
-                $selNum = Read-Input " ▶ 삭제할 자산의 번호를 입력하세요"
+                $selNum = Read-Input " ▶ 삭제할 대상 자산의 번호를 입력하세요"
                 $selIdx = [int]$selNum - 1
                 if ($selIdx -lt 0 -or $selIdx -ge $results.Count) {
                     Write-Host " [!] 잘못된 번호입니다." -ForegroundColor Red
@@ -1158,16 +1204,98 @@ while ($true) {
                 }
 
                 $selected = $results[$selIdx]
-                Write-Host "`n [!] 삭제 대상: $($selected.AssetName) ($($selected.IP)) - 포함된 계정: $($selected.Accounts.Count)개" -ForegroundColor Yellow
-                $confirm = Read-Input " ▶ 해당 자산과 등록된 모든 계정을 완전히 삭제하시겠습니까? (Y/N)" -AllowEmpty $true
-                if ($confirm -match '^[Yy]$') {
-                    $assets = @($assets | Where-Object { $_.AssetID -ne $selected.AssetID })
-                    Save-Assets -Assets $assets
-                    Write-Host "`n [v] 자산 및 하위 계정이 모두 삭제되었습니다." -ForegroundColor Green
+                $accList = @($selected.Accounts)
+
+                # 자산에 등록된 계정이 2개 이상인 경우 선택지 제공
+                if ($accList.Count -ge 2) {
+                    Clear-Host
+                    Show-Banner -Title "삭제 옵션 선택" -Color "Red"
+                    Write-Host " [ 대상 자산: $($selected.AssetName) ($($selected.IP)) ]" -ForegroundColor Cyan
+                    Write-Host " ───────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
+                    
+                    $hNo    = Pad-RightDisplay "번호" 6
+                    $hAcc   = Pad-RightDisplay "접근유형" 10
+                    $hType  = Pad-RightDisplay "구분/역할" 12
+                    $hID    = Pad-RightDisplay "계정 ID" 16
+                    $hPW    = Pad-RightDisplay "패스워드" 20
+                    $hDesc  = Pad-RightDisplay "계정 설명/메모" 20
+
+                    Write-Host "  $hNo $hAcc $hType $hID $hPW $hDesc" -ForegroundColor DarkGray
+                    Write-Host "  ────   ────────  ──────────  ──────────────  ──────────────────  ────────────────────" -ForegroundColor DarkGray
+
+                    for ($i = 0; $i -lt $accList.Count; $i++) {
+                        $acc = $accList[$i]
+                        $noStr = ($i + 1).ToString()
+                        $accTypeStr = if ($acc.AccessType) { "[$($acc.AccessType)]" } else { "[CLI]" }
+                        $roleStr = if ($acc.AccessType.ToUpper() -eq "GUI") { "[-]" } elseif ($acc.AccountType -and $acc.AccountType -ne "-") { "[$($acc.AccountType)]" } else { "[-]" }
+
+                        $cNo   = Pad-RightDisplay $noStr 6
+                        $cAcc  = Pad-RightDisplay $accTypeStr 10
+                        $cType = Pad-RightDisplay $roleStr 12
+                        $cID   = Pad-RightDisplay $acc.ID 16
+                        $cPW   = Pad-RightDisplay $acc.PW 20
+                        $cDesc = Pad-RightDisplay $acc.Description 20
+
+                        Write-Host "  $cNo $cAcc $cType $cID $cPW $cDesc" -ForegroundColor White
+                    }
+
+                    Write-Host "`n ───────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
+                    Write-Host "   [1] 특정 계정만 선택하여 삭제" -ForegroundColor Yellow
+                    Write-Host "   [2] 이 자산 전체 및 모든 계정 일괄 삭제" -ForegroundColor Red
+                    Write-Host "   [0] 삭제 취소 (메인 메뉴로 이동)" -ForegroundColor DarkGray
+                    Write-Host " ───────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
+
+                    $delChoice = (Read-Host " ▶ 작업을 선택하세요").Trim()
+                    if ($delChoice -eq '1') {
+                        $delAccNo = Read-Input " ▶ 삭제할 계정 번호를 입력하세요"
+                        $delIdx = [int]$delAccNo - 1
+                        if ($delIdx -ge 0 -and $delIdx -lt $accList.Count) {
+                            $targetAcc = $accList[$delIdx]
+                            $roleLabel = if ($targetAcc.AccessType.ToUpper() -eq "GUI") { "" } else { "[$($targetAcc.AccountType)] " }
+                            $confirm = Read-Input " ▶ '[$($targetAcc.AccessType)] $roleLabel$($targetAcc.ID)' 계정을 삭제하시겠습니까? (Y/N)" -AllowEmpty $true
+                            if ($confirm -match '^[Yy]$') {
+                                for ($i = 0; $i -lt $assets.Count; $i++) {
+                                    if ($assets[$i].AssetID -eq $selected.AssetID) {
+                                        $assets[$i].Accounts = @($assets[$i].Accounts | Where-Object { $_.AccountID -ne $targetAcc.AccountID })
+                                        break
+                                    }
+                                }
+                                Save-Assets -Assets $assets
+                                Write-Host "`n [v] 계정이 성공적으로 삭제되었습니다." -ForegroundColor Green
+                            } else {
+                                Write-Host "`n [-] 삭제가 취소되었습니다." -ForegroundColor Yellow
+                            }
+                        } else {
+                            Write-Host " [!] 올바른 계정 번호가 아닙니다." -ForegroundColor Red
+                        }
+                        $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
+                    } elseif ($delChoice -eq '2') {
+                        $confirmAll = Read-Input " ▶ 정말 '$($selected.AssetName)' 자산과 모든 계정을 완전히 삭제하시겠습니까? (Y/N)" -AllowEmpty $true
+                        if ($confirmAll -match '^[Yy]$') {
+                            $assets = @($assets | Where-Object { $_.AssetID -ne $selected.AssetID })
+                            Save-Assets -Assets $assets
+                            Write-Host "`n [v] 자산 및 하위 모든 계정이 완전히 삭제되었습니다." -ForegroundColor Green
+                        } else {
+                            Write-Host "`n [-] 삭제가 취소되었습니다." -ForegroundColor Yellow
+                        }
+                        $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
+                    } else {
+                        Write-Host "`n [-] 삭제 작업이 취소되었습니다." -ForegroundColor Yellow
+                        Start-Sleep -Seconds 1
+                    }
                 } else {
-                    Write-Host "`n [-] 삭제가 취소되었습니다." -ForegroundColor Yellow
+                    # 계정이 1개 이하인 경우 일반 전체 삭제 진행
+                    Write-Host "`n [!] 삭제 대상: $($selected.AssetName) ($($selected.IP)) - 포함된 계정: $($selected.Accounts.Count)개" -ForegroundColor Yellow
+                    $confirm = Read-Input " ▶ 해당 자산과 등록된 모든 계정을 완전히 삭제하시겠습니까? (Y/N)" -AllowEmpty $true
+                    if ($confirm -match '^[Yy]$') {
+                        $assets = @($assets | Where-Object { $_.AssetID -ne $selected.AssetID })
+                        Save-Assets -Assets $assets
+                        Write-Host "`n [v] 자산 및 하위 계정이 모두 삭제되었습니다." -ForegroundColor Green
+                    } else {
+                        Write-Host "`n [-] 삭제가 취소되었습니다." -ForegroundColor Yellow
+                    }
+                    $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
                 }
-                $null = Read-Host "`n ▶ 계속하려면 Enter를 누르세요..."
             } catch {
                 if ($_.Exception.Message -eq "CANCEL_ACTION") {
                     Write-Host "`n [-] 자산 삭제가 취소되어 메인 메뉴로 돌아갑니다." -ForegroundColor Yellow
