@@ -1,4 +1,4 @@
-# ==============================================================================
+﻿# ==============================================================================
 # PowerShell 완전 보안 자산 관리자 (AES-256 + 동적 테이블 너비 자동 정렬)
 # ==============================================================================
 
@@ -21,6 +21,11 @@ try {
         $windowSize.Height = [Math]::Max($windowSize.Height, $targetHeight)
         $rawUI.WindowSize = $windowSize
     }
+} catch {}
+
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    [Console]::InputEncoding  = [System.Text.Encoding]::UTF8
 } catch {}
 
 $DataFile = "$PSScriptRoot\SecureAssets.dat"
