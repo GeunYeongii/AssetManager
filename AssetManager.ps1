@@ -178,10 +178,26 @@ function Normalize-Asset {
                 }
             }
 
+            $port = ""
+            if ($acc.PSObject.Properties['Port'] -and $acc.Port) {
+                $port = [string]$acc.Port
+            } elseif ($accessType.ToUpper() -eq "CLI") {
+                $port = "22"
+            }
+
+            $webUrl = ""
+            if ($acc.PSObject.Properties['WebURL'] -and $acc.WebURL) {
+                $webUrl = [string]$acc.WebURL
+            } elseif ($accessType.ToUpper() -eq "GUI" -and $raw.PSObject.Properties['WebURL'] -and $raw.WebURL) {
+                $webUrl = [string]$raw.WebURL
+            }
+
             $accList += [PSCustomObject]@{
                 AccountID   = if ($acc.AccountID) { [string]$acc.AccountID } else { [guid]::NewGuid().ToString() }
                 AccessType  = $accessType
                 AccountType = $role
+                Port        = $port
+                WebURL      = $webUrl
                 ID          = $accId
                 PW          = [string]$acc.PW
                 Description = if ($acc.Description) { [string]$acc.Description } else { "" }
@@ -195,6 +211,8 @@ function Normalize-Asset {
                 AccountID   = [guid]::NewGuid().ToString()
                 AccessType  = "CLI"
                 AccountType = $role
+                Port        = "22"
+                WebURL      = ""
                 ID          = $accId
                 PW          = [string]$raw.PW
                 Description = "기존 등록 계정"
@@ -202,11 +220,17 @@ function Normalize-Asset {
         }
     }
 
+    $assetUrl = if ($raw.PSObject.Properties['WebURL'] -and $raw.WebURL) { [string]$raw.WebURL } else { "" }
+    if ([string]::IsNullOrWhiteSpace($assetUrl)) {
+        $firstGuiWithUrl = $accList | Where-Object { $_.AccessType.ToUpper() -eq "GUI" -and -not [string]::IsNullOrWhiteSpace($_.WebURL) } | Select-Object -First 1
+        if ($firstGuiWithUrl) { $assetUrl = $firstGuiWithUrl.WebURL }
+    }
+
     return [PSCustomObject]@{
         AssetID   = if ($raw.AssetID) { [string]$raw.AssetID } else { [guid]::NewGuid().ToString() }
         AssetName = [string]$raw.AssetName
         IP        = [string]$raw.IP
-        WebURL    = [string]$raw.WebURL
+        WebURL    = $assetUrl
         Note      = [string]$raw.Note
         Accounts  = $accList
     }
@@ -661,8 +685,9 @@ function Show-AssetSummaryTable {
 
         $summaryParts = @()
         if ($cliAccs.Count -gt 0) {
-            $first = $cliAccs[0].ID
-            $cliStr = if ($cliAccs.Count -eq 1) { "CLI:$first" } else { "CLI:$first 외 $($cliAccs.Count - 1)" }
+            $first = $cliAccs[0]
+            $pStr = if ($first.Port -and $first.Port -ne "22") { ":$($first.Port)" } else { "" }
+            $cliStr = if ($cliAccs.Count -eq 1) { "CLI:$($first.ID)$pStr" } else { "CLI:$($first.ID)$pStr 외 $($cliAccs.Count - 1)" }
             $summaryParts += $cliStr
         }
         if ($guiAccs.Count -gt 0) {
@@ -766,8 +791,9 @@ function Select-AssetFromTable {
 
         $summaryParts = @()
         if ($cliAccs.Count -gt 0) {
-            $first = $cliAccs[0].ID
-            $cliStr = if ($cliAccs.Count -eq 1) { "CLI:$first" } else { "CLI:$first 외 $($cliAccs.Count - 1)" }
+            $first = $cliAccs[0]
+            $pStr = if ($first.Port -and $first.Port -ne "22") { ":$($first.Port)" } else { "" }
+            $cliStr = if ($cliAccs.Count -eq 1) { "CLI:$($first.ID)$pStr" } else { "CLI:$($first.ID)$pStr 외 $($cliAccs.Count - 1)" }
             $summaryParts += $cliStr
         }
         if ($guiAccs.Count -gt 0) {
@@ -917,6 +943,7 @@ function Show-AccountListTable {
     $wNo   = Get-DisplayWidth "번호"
     $wAcc  = Get-DisplayWidth "접근유형"
     $wType = Get-DisplayWidth "구분/역할"
+    $wPort = Get-DisplayWidth "포트"
     $wID   = Get-DisplayWidth "계정 ID"
     $wPW   = Get-DisplayWidth "패스워드"
     $wDesc = Get-DisplayWidth "계정 설명/메모"
@@ -927,6 +954,11 @@ function Show-AccountListTable {
         $noStr = ($i + 1).ToString()
         $accTypeStr = if ($acc.AccessType) { "[$($acc.AccessType)]" } else { "[CLI]" }
         $roleStr = if ($acc.AccessType.ToUpper() -eq "GUI") { "[-]" } elseif ($acc.AccountType -and $acc.AccountType -ne "-") { "[$($acc.AccountType)]" } else { "[-]" }
+        $portStr = if ($acc.AccessType.ToUpper() -eq "CLI") { 
+            if ($acc.Port) { [string]$acc.Port } else { "22" } 
+        } else { 
+            "-" 
+        }
         $pwStr = if ($acc.PW) { $acc.PW } else { "-" }
         $descStr = if ($acc.Description) { $acc.Description } else { "-" }
 
@@ -934,6 +966,7 @@ function Show-AccountListTable {
             NoStr   = $noStr
             AccStr  = $accTypeStr
             RoleStr = $roleStr
+            PortStr = $portStr
             IDStr   = $acc.ID
             PWStr   = $pwStr
             DescStr = $descStr
@@ -942,6 +975,7 @@ function Show-AccountListTable {
         $wNo   = [Math]::Max($wNo, (Get-DisplayWidth $noStr))
         $wAcc  = [Math]::Max($wAcc, (Get-DisplayWidth $accTypeStr))
         $wType = [Math]::Max($wType, (Get-DisplayWidth $roleStr))
+        $wPort = [Math]::Max($wPort, (Get-DisplayWidth $portStr))
         $wID   = [Math]::Max($wID, (Get-DisplayWidth $acc.ID))
         $wPW   = [Math]::Max($wPW, (Get-DisplayWidth $pwStr))
         $wDesc = [Math]::Max($wDesc, (Get-DisplayWidth $descStr))
@@ -950,6 +984,7 @@ function Show-AccountListTable {
     # 컬럼별 최대 상한선 적용 (창 너비 초과 방지)
     $wAcc  = [Math]::Min($wAcc, 16)
     $wType = [Math]::Min($wType, 16)
+    $wPort = [Math]::Min($wPort, 10)
     $wID   = [Math]::Min($wID, 20)
     $wPW   = [Math]::Min($wPW, 28)
     $wDesc = [Math]::Min($wDesc, 34)
@@ -963,6 +998,7 @@ function Show-AccountListTable {
     $hNo   = Pad-RightDisplay "번호" $wNo
     $hAcc  = Pad-RightDisplay "접근유형" $wAcc
     $hType = Pad-RightDisplay "구분/역할" $wType
+    $hPort = Pad-RightDisplay "포트" $wPort
     $hID   = Pad-RightDisplay "계정 ID" $wID
     $hPW   = Pad-RightDisplay "패스워드" $wPW
     $hDesc = Pad-RightDisplay "계정 설명/메모" $wDesc
@@ -970,12 +1006,13 @@ function Show-AccountListTable {
     $sepNo   = "─" * $wNo
     $sepAcc  = "─" * $wAcc
     $sepType = "─" * $wType
+    $sepPort = "─" * $wPort
     $sepID   = "─" * $wID
     $sepPW   = "─" * $wPW
     $sepDesc = "─" * $wDesc
 
-    $hLine = "  " + $hNo + $gap + $hAcc + $gap + $hType + $gap + $hID + $gap + $hPW + $gap + $hDesc
-    $sLine = "  " + $sepNo + $gap + $sepAcc + $gap + $sepType + $gap + $sepID + $gap + $sepPW + $gap + $sepDesc
+    $hLine = "  " + $hNo + $gap + $hAcc + $gap + $hType + $gap + $hPort + $gap + $hID + $gap + $hPW + $gap + $hDesc
+    $sLine = "  " + $sepNo + $gap + $sepAcc + $gap + $sepType + $gap + $sepPort + $gap + $sepID + $gap + $sepPW + $gap + $sepDesc
 
     Write-Host (Truncate-DisplayString $hLine $maxRowWidth) -ForegroundColor DarkGray
     Write-Host (Truncate-DisplayString $sLine $maxRowWidth) -ForegroundColor DarkGray
@@ -984,11 +1021,12 @@ function Show-AccountListTable {
         $cNo   = Pad-RightDisplay (Truncate-DisplayString $r.NoStr $wNo) $wNo
         $cAcc  = Pad-RightDisplay (Truncate-DisplayString $r.AccStr $wAcc) $wAcc
         $cType = Pad-RightDisplay (Truncate-DisplayString $r.RoleStr $wType) $wType
+        $cPort = Pad-RightDisplay (Truncate-DisplayString $r.PortStr $wPort) $wPort
         $cID   = Pad-RightDisplay (Truncate-DisplayString $r.IDStr $wID) $wID
         $cPW   = Pad-RightDisplay (Truncate-DisplayString $r.PWStr $wPW) $wPW
         $cDesc = Pad-RightDisplay (Truncate-DisplayString $r.DescStr $wDesc) $wDesc
 
-        $rLine = "  " + $cNo + $gap + $cAcc + $gap + $cType + $gap + $cID + $gap + $cPW + $gap + $cDesc
+        $rLine = "  " + $cNo + $gap + $cAcc + $gap + $cType + $gap + $cPort + $gap + $cID + $gap + $cPW + $gap + $cDesc
         Write-Host (Truncate-DisplayString $rLine $maxRowWidth) -ForegroundColor White
     }
 }
@@ -1010,6 +1048,8 @@ function Search-Assets {
                     if ($acc.ID -like "*$Keyword*" -or 
                         $acc.AccountType -like "*$Keyword*" -or 
                         $acc.AccessType -like "*$Keyword*" -or 
+                        $acc.Port -like "*$Keyword*" -or 
+                        $acc.WebURL -like "*$Keyword*" -or 
                         $acc.Description -like "*$Keyword*" -or 
                         $acc.PW -like "*$Keyword*") {
                         $foundInAcc = $true
@@ -1024,10 +1064,11 @@ function Search-Assets {
     return @($results)
 }
 
-# 17. 단일 계정 정보 입력 헬퍼 (CLI는 root/일반 관리, GUI는 역할 미사용)
+# 17. 단일 계정 정보 입력 헬퍼 (CLI는 root/일반/포트 관리, GUI는 웹 URL/ID/PW 관리)
 function Read-NewAccountInput {
     param(
         [array]$ExistingAccounts,
+        [string]$ExistingWebURL = "",
         [string]$HeaderMessage = "새 계정 정보 입력"
     )
     Write-Host "`n [ $HeaderMessage ] ('q' 입력 시 취소)" -ForegroundColor Cyan
@@ -1043,6 +1084,8 @@ function Read-NewAccountInput {
     $accessType = if ($typeChoice -eq '2') { "GUI" } else { "CLI" }
 
     $accRole = "-"
+    $accPort = ""
+    $accWebURL = ""
 
     if ($accessType -eq "GUI") {
         # ── GUI 웹콘솔 계정 입력 (역할 개념 없음) ──
@@ -1056,6 +1099,30 @@ function Read-NewAccountInput {
             break
         }
         $accRole = "-"
+
+        # ── GUI 웹 접속 URL 입력 ──
+        while ($true) {
+            if (-not [string]::IsNullOrWhiteSpace($ExistingWebURL)) {
+                $inURL = Read-Input " ▶ 웹 접속 URL [$ExistingWebURL] (기존 URL 유지 시 Enter)" -AllowEmpty $true
+                if ([string]::IsNullOrWhiteSpace($inURL)) {
+                    $accWebURL = $ExistingWebURL
+                    Write-Host " [*] 기존 등록된 GUI URL이 자동 적용되었습니다: $accWebURL" -ForegroundColor Cyan
+                    break
+                } else {
+                    $accWebURL = $inURL
+                    break
+                }
+            } else {
+                $inURL = Read-Input " ▶ 웹 접속 URL" -AllowEmpty $true
+                if ([string]::IsNullOrWhiteSpace($inURL)) {
+                    Write-Host " [!] 기존 등록된 GUI URL이 없습니다. 웹 접속 URL을 반드시 입력해야 합니다.`n" -ForegroundColor Yellow
+                    continue
+                } else {
+                    $accWebURL = $inURL
+                    break
+                }
+            }
+        }
     } else {
         # ── CLI 원격/콘솔 계정 입력 (root 고유성 관리) ──
         $hasCliRoot = Test-HasCliRootRole -Accounts $ExistingAccounts
@@ -1092,6 +1159,14 @@ function Read-NewAccountInput {
                 $accRole = $inRole
             }
         }
+
+        # ── CLI 포트 번호 입력 ──
+        $inPort = Read-Input " ▶ 포트 번호 (미입력 시 22)" -AllowEmpty $true
+        if ([string]::IsNullOrWhiteSpace($inPort)) {
+            $accPort = "22"
+        } else {
+            $accPort = $inPort
+        }
     }
 
     # 패스워드 입력 (* 마스킹)
@@ -1102,6 +1177,8 @@ function Read-NewAccountInput {
         AccountID   = [guid]::NewGuid().ToString()
         AccessType  = $accessType
         AccountType = $accRole
+        Port        = $accPort
+        WebURL      = $accWebURL
         ID          = $accID
         PW          = $accPW
         Description = $accDesc
@@ -1127,7 +1204,8 @@ function Show-AssetDetailManage {
         Write-Host " [ 자산 기본 정보 ]" -ForegroundColor Cyan
         Write-Host "  * 자산명 : $($targetAsset.AssetName)" -ForegroundColor White
         Write-Host "  * IP 주소: $($targetAsset.IP)" -ForegroundColor White
-        Write-Host "  * 접속URL: $($targetAsset.WebURL)" -ForegroundColor White
+        $dispURL = if ($targetAsset.WebURL) { $targetAsset.WebURL } else { "-" }
+        Write-Host "  * 접속URL: $dispURL" -ForegroundColor White
         Write-Host "  * 비고   : $($targetAsset.Note)" -ForegroundColor White
         Write-Host " ───────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
 
@@ -1151,11 +1229,14 @@ function Show-AssetDetailManage {
             # ── 1. 계정 추가 ──
             '1' {
                 try {
-                    $newAcc = Read-NewAccountInput -ExistingAccounts $targetAsset.Accounts -HeaderMessage "새 계정 추가"
+                    $newAcc = Read-NewAccountInput -ExistingAccounts $targetAsset.Accounts -ExistingWebURL $targetAsset.WebURL -HeaderMessage "새 계정 추가"
 
                     for ($i = 0; $i -lt $allAssets.Count; $i++) {
                         if ($allAssets[$i].AssetID -eq $AssetID) {
                             $allAssets[$i].Accounts += $newAcc
+                            if ($newAcc.AccessType -eq "GUI" -and $newAcc.WebURL) {
+                                $allAssets[$i].WebURL = $newAcc.WebURL
+                            }
                             break
                         }
                     }
@@ -1195,6 +1276,8 @@ function Show-AssetDetailManage {
                         # CLI root 계정 수정
                         Write-Host " [*] CLI 관리자(root) 계정 수정 모드입니다. 계정 ID와 역할([root])은 자동 유지됩니다." -ForegroundColor Yellow
                         
+                        $currPort = if ($targetAcc.Port) { $targetAcc.Port } else { "22" }
+                        $uPort = Read-Input " ▶ 포트 번호 [$currPort]" -IsEditMode $true
                         $uPW = Read-MaskedInput -PromptText " ▶ 변경할 패스워드 (기존 유지 시 Enter)" -IsEditMode $true
                         $uDesc = Read-Input " ▶ 계정 설명/메모 [$($targetAcc.Description)]" -IsEditMode $true
 
@@ -1202,6 +1285,7 @@ function Show-AssetDetailManage {
                             if ($allAssets[$i].AssetID -eq $AssetID) {
                                 for ($j = 0; $j -lt $allAssets[$i].Accounts.Count; $j++) {
                                     if ($allAssets[$i].Accounts[$j].AccountID -eq $targetAcc.AccountID) {
+                                        if ($uPort) { $allAssets[$i].Accounts[$j].Port = $uPort }
                                         if ($uPW)   { $allAssets[$i].Accounts[$j].PW = $uPW }
                                         if ($uDesc) { $allAssets[$i].Accounts[$j].Description = $uDesc }
                                         break
@@ -1224,6 +1308,8 @@ function Show-AssetDetailManage {
                             }
                         }
 
+                        $currURL = if ($targetAcc.WebURL) { $targetAcc.WebURL } elseif ($targetAsset.WebURL) { $targetAsset.WebURL } else { "" }
+                        $uURL  = Read-Input " ▶ 웹 접속 URL [$currURL]" -IsEditMode $true
                         $uPW   = Read-MaskedInput -PromptText " ▶ 패스워드 (기존 유지 시 Enter)" -IsEditMode $true
                         $uDesc = Read-Input " ▶ 계정 설명/메모 [$($targetAcc.Description)]" -IsEditMode $true
 
@@ -1232,6 +1318,10 @@ function Show-AssetDetailManage {
                                 for ($j = 0; $j -lt $allAssets[$i].Accounts.Count; $j++) {
                                     if ($allAssets[$i].Accounts[$j].AccountID -eq $targetAcc.AccountID) {
                                         if ($uID)   { $allAssets[$i].Accounts[$j].ID = $finalID }
+                                        if ($uURL)  { 
+                                            $allAssets[$i].Accounts[$j].WebURL = $uURL
+                                            $allAssets[$i].WebURL = $uURL
+                                        }
                                         if ($uPW)   { $allAssets[$i].Accounts[$j].PW = $uPW }
                                         if ($uDesc) { $allAssets[$i].Accounts[$j].Description = $uDesc }
                                         break
@@ -1263,6 +1353,8 @@ function Show-AssetDetailManage {
                             }
                         }
 
+                        $currPort = if ($targetAcc.Port) { $targetAcc.Port } else { "22" }
+                        $uPort = Read-Input " ▶ 포트 번호 [$currPort]" -IsEditMode $true
                         $uRole = Read-Input " ▶ 계정 구분/역할 [$($targetAcc.AccountType)]" -IsEditMode $true
                         $uPW   = Read-MaskedInput -PromptText " ▶ 패스워드 (기존 유지 시 Enter)" -IsEditMode $true
                         $uDesc = Read-Input " ▶ 계정 설명/메모 [$($targetAcc.Description)]" -IsEditMode $true
@@ -1272,6 +1364,7 @@ function Show-AssetDetailManage {
                                 for ($j = 0; $j -lt $allAssets[$i].Accounts.Count; $j++) {
                                     if ($allAssets[$i].Accounts[$j].AccountID -eq $targetAcc.AccountID) {
                                         if ($uID)   { $allAssets[$i].Accounts[$j].ID = $finalID }
+                                        if ($uPort) { $allAssets[$i].Accounts[$j].Port = $uPort }
                                         if ($uRole) { $allAssets[$i].Accounts[$j].AccountType = $uRole }
                                         if ($uPW)   { $allAssets[$i].Accounts[$j].PW = $uPW }
                                         if ($uDesc) { $allAssets[$i].Accounts[$j].Description = $uDesc }
@@ -1437,7 +1530,8 @@ while ($true) {
                     Write-Host " ───────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
                     Write-Host "  * 자산명 : $($existingAsset.AssetName)" -ForegroundColor White
                     Write-Host "  * IP 주소: $($existingAsset.IP)" -ForegroundColor White
-                    Write-Host "  * 접속URL: $($existingAsset.WebURL)" -ForegroundColor White
+                    $dispURL = if ($existingAsset.WebURL) { $existingAsset.WebURL } else { "-" }
+                    Write-Host "  * 접속URL: $dispURL" -ForegroundColor White
                     Write-Host "  * 비고   : $($existingAsset.Note)" -ForegroundColor White
                     
                     $currAccounts = @($existingAsset.Accounts)
@@ -1446,7 +1540,12 @@ while ($true) {
                         $accSummaryStr = "등록된 계정 없음"
                     } else {
                         $accNames = $currAccounts | ForEach-Object { 
-                            if ($_.AccessType.ToUpper() -eq "GUI") { "GUI:$($_.ID)" } else { "CLI:$($_.ID)($($_.AccountType))" }
+                            if ($_.AccessType.ToUpper() -eq "GUI") { 
+                                "GUI:$($_.ID)" 
+                            } else { 
+                                $pStr = if ($_.Port -and $_.Port -ne "22") { ":$($_.Port)" } else { "" }
+                                "CLI:$($_.ID)$pStr($($_.AccountType))" 
+                            }
                         }
                         $accSummaryStr = $accNames -join ", "
                     }
@@ -1460,7 +1559,7 @@ while ($true) {
                         break
                     }
 
-                    Write-Host "`n [*] '$($existingAsset.AssetName)' 자산에 새 계정을 추가합니다. (접속URL 등은 자동 유지됩니다)" -ForegroundColor Cyan
+                    Write-Host "`n [*] '$($existingAsset.AssetName)' 자산에 새 계정을 추가합니다. (기존 정보는 자동 유지됩니다)" -ForegroundColor Cyan
                     
                     $extraNote = Read-Input " ▶ 추가할 비고/메모 (기존 유지 시 Enter)" -AllowEmpty $true -IsEditMode $true
                     if ($extraNote) {
@@ -1480,11 +1579,14 @@ while ($true) {
                     $addedCount = 0
                     while ($true) {
                         $targetForAcc = $assets | Where-Object { $_.AssetID -eq $existingAsset.AssetID }
-                        $newAcc = Read-NewAccountInput -ExistingAccounts $targetForAcc.Accounts -HeaderMessage "추가할 계정 정보 입력"
+                        $newAcc = Read-NewAccountInput -ExistingAccounts $targetForAcc.Accounts -ExistingWebURL $targetForAcc.WebURL -HeaderMessage "추가할 계정 정보 입력"
                         
                         for ($i = 0; $i -lt $assets.Count; $i++) {
                             if ($assets[$i].AssetID -eq $existingAsset.AssetID) {
                                 $assets[$i].Accounts += $newAcc
+                                if ($newAcc.AccessType -eq "GUI" -and $newAcc.WebURL) {
+                                    $assets[$i].WebURL = $newAcc.WebURL
+                                }
                                 break
                             }
                         }
@@ -1503,12 +1605,15 @@ while ($true) {
                 } else {
                     # ── CASE B: 신규 IP인 경우 ──
                     $inputName = Read-Input " ▶ 2. 자산 이름"
-                    $inputURL  = Read-Input " ▶ 3. 접속 URL (없을 시 Enter)" -AllowEmpty $true
-                    $inputNote = Read-Input " ▶ 4. 비고/메모 (없을 시 Enter)" -AllowEmpty $true
+                    $inputNote = Read-Input " ▶ 3. 비고/메모 (없을 시 Enter)" -AllowEmpty $true
 
                     # 첫 번째 계정 등록
                     $newAccounts = @()
-                    $firstAcc = Read-NewAccountInput -ExistingAccounts $newAccounts -HeaderMessage "첫 번째 계정 정보 등록"
+                    $currentWebURL = ""
+                    $firstAcc = Read-NewAccountInput -ExistingAccounts $newAccounts -ExistingWebURL $currentWebURL -HeaderMessage "첫 번째 계정 정보 등록"
+                    if ($firstAcc.AccessType -eq "GUI" -and $firstAcc.WebURL) {
+                        $currentWebURL = $firstAcc.WebURL
+                    }
                     $newAccounts += $firstAcc
 
                     # 추가 계정 연속 등록 여부
@@ -1517,7 +1622,10 @@ while ($true) {
                         if ($more -notmatch '^[Yy]$') {
                             break
                         }
-                        $nextAcc = Read-NewAccountInput -ExistingAccounts $newAccounts -HeaderMessage "추가 계정 정보 등록"
+                        $nextAcc = Read-NewAccountInput -ExistingAccounts $newAccounts -ExistingWebURL $currentWebURL -HeaderMessage "추가 계정 정보 등록"
+                        if ($nextAcc.AccessType -eq "GUI" -and $nextAcc.WebURL) {
+                            $currentWebURL = $nextAcc.WebURL
+                        }
                         $newAccounts += $nextAcc
                     }
 
@@ -1525,7 +1633,7 @@ while ($true) {
                         AssetID   = [guid]::NewGuid().ToString()
                         AssetName = $inputName
                         IP        = $inputIP
-                        WebURL    = $inputURL
+                        WebURL    = $currentWebURL
                         Note      = $inputNote
                         Accounts  = $newAccounts
                     }
@@ -1582,7 +1690,7 @@ while ($true) {
                 $newIP = Read-Input " ▶ 2. IP 주소 [$($assets[$origIdx].IP)]" -IsEditMode $true
                 if ($newIP) { $assets[$origIdx].IP = $newIP }
 
-                $newURL = Read-Input " ▶ 3. 접속 URL [$($assets[$origIdx].WebURL)]" -IsEditMode $true
+                $newURL = Read-Input " ▶ 3. 웹 접속 URL [$($assets[$origIdx].WebURL)]" -IsEditMode $true
                 if ($newURL) { $assets[$origIdx].WebURL = $newURL }
 
                 $newNote = Read-Input " ▶ 4. 비고/메모 [$($assets[$origIdx].Note)]" -IsEditMode $true
