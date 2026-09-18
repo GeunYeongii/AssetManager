@@ -174,7 +174,9 @@ function Normalize-Asset {
                 if ($accId.ToLower() -eq "root" -or $accId.ToLower() -eq "administrator") {
                     $role = "root"
                 } else {
-                    $role = if ($acc.AccountType -and $acc.AccountType -ne "-") { [string]$acc.AccountType } else { "일반" }
+                    $role = if ($acc.AccountType -and $acc.AccountType -ne "-") {
+                        if ($acc.AccountType -eq "일반") { "user" } else { [string]$acc.AccountType }
+                    } else { "user" }
                 }
             }
 
@@ -183,6 +185,17 @@ function Normalize-Asset {
                 $port = [string]$acc.Port
             } elseif ($accessType.ToUpper() -eq "CLI") {
                 $port = "22"
+            } elseif ($accessType.ToUpper() -eq "GUI") {
+                $checkUrl = if ($acc.PSObject.Properties['WebURL'] -and $acc.WebURL) { [string]$acc.WebURL } elseif ($raw.PSObject.Properties['WebURL'] -and $raw.WebURL) { [string]$raw.WebURL } else { "" }
+                if ($checkUrl -match ':(\d+)(?:/|$|\?)') {
+                    $port = $matches[1]
+                } elseif ($checkUrl -match '^http://') {
+                    $port = "80"
+                } elseif ($checkUrl -match '^https://') {
+                    $port = "443"
+                } else {
+                    $port = "443"
+                }
             }
 
             $webUrl = ""
@@ -206,7 +219,7 @@ function Normalize-Asset {
     } elseif ($raw.PSObject.Properties['ID'] -or $raw.PSObject.Properties['PW']) {
         if ($raw.ID -or $raw.PW) {
             $accId = [string]$raw.ID
-            $role = if ($accId.ToLower() -eq "root" -or $accId.ToLower() -eq "administrator") { "root" } else { "일반" }
+            $role = if ($accId.ToLower() -eq "root" -or $accId.ToLower() -eq "administrator") { "root" } else { "user" }
             $accList += [PSCustomObject]@{
                 AccountID   = [guid]::NewGuid().ToString()
                 AccessType  = "CLI"
@@ -691,8 +704,9 @@ function Show-AssetSummaryTable {
             $summaryParts += $cliStr
         }
         if ($guiAccs.Count -gt 0) {
-            $first = $guiAccs[0].ID
-            $guiStr = if ($guiAccs.Count -eq 1) { "GUI:$first" } else { "GUI:$first 외 $($guiAccs.Count - 1)" }
+            $first = $guiAccs[0]
+            $pStr = if ($first.Port -and $first.Port -ne "443" -and $first.Port -ne "80") { ":$($first.Port)" } else { "" }
+            $guiStr = if ($guiAccs.Count -eq 1) { "GUI:$($first.ID)$pStr" } else { "GUI:$($first.ID)$pStr 외 $($guiAccs.Count - 1)" }
             $summaryParts += $guiStr
         }
 
@@ -797,8 +811,9 @@ function Select-AssetFromTable {
             $summaryParts += $cliStr
         }
         if ($guiAccs.Count -gt 0) {
-            $first = $guiAccs[0].ID
-            $guiStr = if ($guiAccs.Count -eq 1) { "GUI:$first" } else { "GUI:$first 외 $($guiAccs.Count - 1)" }
+            $first = $guiAccs[0]
+            $pStr = if ($first.Port -and $first.Port -ne "443" -and $first.Port -ne "80") { ":$($first.Port)" } else { "" }
+            $guiStr = if ($guiAccs.Count -eq 1) { "GUI:$($first.ID)$pStr" } else { "GUI:$($first.ID)$pStr 외 $($guiAccs.Count - 1)" }
             $summaryParts += $guiStr
         }
 
@@ -954,8 +969,10 @@ function Show-AccountListTable {
         $noStr = ($i + 1).ToString()
         $accTypeStr = if ($acc.AccessType) { "[$($acc.AccessType)]" } else { "[CLI]" }
         $roleStr = if ($acc.AccessType.ToUpper() -eq "GUI") { "[-]" } elseif ($acc.AccountType -and $acc.AccountType -ne "-") { "[$($acc.AccountType)]" } else { "[-]" }
-        $portStr = if ($acc.AccessType.ToUpper() -eq "CLI") { 
-            if ($acc.Port) { [string]$acc.Port } else { "22" } 
+        $portStr = if ($acc.Port) { 
+            [string]$acc.Port 
+        } elseif ($acc.AccessType.ToUpper() -eq "CLI") { 
+            "22" 
         } else { 
             "-" 
         }
@@ -1123,6 +1140,22 @@ function Read-NewAccountInput {
                 }
             }
         }
+        # ── GUI 포트 번호 입력 ──
+        $defaultGuiPort = "443"
+        if ($accWebURL -match ':(\d+)(?:/|$|\?)') {
+            $defaultGuiPort = $matches[1]
+        } elseif ($accWebURL -match '^http://') {
+            $defaultGuiPort = "80"
+        } elseif ($accWebURL -match '^https://') {
+            $defaultGuiPort = "443"
+        }
+
+        $inPort = Read-Input " ▶ 포트 번호 (미입력 시 $defaultGuiPort)" -AllowEmpty $true
+        if ([string]::IsNullOrWhiteSpace($inPort)) {
+            $accPort = $defaultGuiPort
+        } else {
+            $accPort = $inPort
+        }
     } else {
         # ── CLI 원격/콘솔 계정 입력 (root 고유성 관리) ──
         $hasCliRoot = Test-HasCliRootRole -Accounts $ExistingAccounts
@@ -1134,7 +1167,7 @@ function Read-NewAccountInput {
 
             # CLI에 이미 root가 있는데 root 또는 administrator 추가 시도시 차단
             if (($normId -eq "root" -or $normId -eq "administrator") -and $hasCliRoot) {
-                Write-Host " [!] [CLI]에 이미 root(관리자) 계정이 등록되어 있습니다. 일반 계정 ID를 입력하세요.`n" -ForegroundColor Red
+                Write-Host " [!] [CLI]에 이미 root(관리자) 계정이 등록되어 있습니다. 일반(user) 계정 ID를 입력하세요.`n" -ForegroundColor Red
                 continue
             }
             
@@ -1149,12 +1182,12 @@ function Read-NewAccountInput {
         if ($accID.ToLower() -eq "root" -or $accID.ToLower() -eq "administrator") {
             $accRole = "root"
         } elseif ($hasCliRoot) {
-            $accRole = "일반"
-            Write-Host " [*] [CLI]에 이미 관리자(root) 계정이 존재하여 역할이 자동으로 '일반'으로 지정됩니다." -ForegroundColor DarkGray
+            $accRole = "user"
+            Write-Host " [*] [CLI]에 이미 관리자(root) 계정이 존재하여 역할이 자동으로 'user'로 지정됩니다." -ForegroundColor DarkGray
         } else {
-            $inRole = Read-Input " ▶ 계정 구분/역할" -AllowEmpty $true
+            $inRole = Read-Input " ▶ 계정 구분/역할 (미입력 시 user)" -AllowEmpty $true
             if ([string]::IsNullOrWhiteSpace($inRole)) {
-                $accRole = "일반"
+                $accRole = "user"
             } else {
                 $accRole = $inRole
             }
@@ -1310,6 +1343,8 @@ function Show-AssetDetailManage {
 
                         $currURL = if ($targetAcc.WebURL) { $targetAcc.WebURL } elseif ($targetAsset.WebURL) { $targetAsset.WebURL } else { "" }
                         $uURL  = Read-Input " ▶ 웹 접속 URL [$currURL]" -IsEditMode $true
+                        $currPort = if ($targetAcc.Port) { $targetAcc.Port } else { "443" }
+                        $uPort = Read-Input " ▶ 포트 번호 [$currPort]" -IsEditMode $true
                         $uPW   = Read-MaskedInput -PromptText " ▶ 패스워드 (기존 유지 시 Enter)" -IsEditMode $true
                         $uDesc = Read-Input " ▶ 계정 설명/메모 [$($targetAcc.Description)]" -IsEditMode $true
 
@@ -1322,6 +1357,7 @@ function Show-AssetDetailManage {
                                             $allAssets[$i].Accounts[$j].WebURL = $uURL
                                             $allAssets[$i].WebURL = $uURL
                                         }
+                                        if ($uPort) { $allAssets[$i].Accounts[$j].Port = $uPort }
                                         if ($uPW)   { $allAssets[$i].Accounts[$j].PW = $uPW }
                                         if ($uDesc) { $allAssets[$i].Accounts[$j].Description = $uDesc }
                                         break
@@ -1331,14 +1367,14 @@ function Show-AssetDetailManage {
                             }
                         }
                     } else {
-                        # CLI 일반 계정 수정
+                        # CLI 일반(user) 계정 수정
                         $uID = Read-Input " ▶ 계정 ID [$($targetAcc.ID)]" -IsEditMode $true
                         $finalID = if ($uID) { $uID } else { $targetAcc.ID }
 
                         if ($finalID.ToLower() -eq "root" -or $finalID.ToLower() -eq "administrator") {
                             $hasRootAlready = Test-HasCliRootRole -Accounts @($targetAsset.Accounts | Where-Object { $_.AccountID -ne $targetAcc.AccountID })
                             if ($hasRootAlready) {
-                                Write-Host "`n [!] [CLI]에 이미 root 계정이 존재하므로 일반 계정을 root로 변경할 수 없습니다." -ForegroundColor Red
+                                Write-Host "`n [!] [CLI]에 이미 root 계정이 존재하므로 일반(user) 계정을 root로 변경할 수 없습니다." -ForegroundColor Red
                                 Start-Sleep -Seconds 1
                                 break
                             }
@@ -1355,7 +1391,10 @@ function Show-AssetDetailManage {
 
                         $currPort = if ($targetAcc.Port) { $targetAcc.Port } else { "22" }
                         $uPort = Read-Input " ▶ 포트 번호 [$currPort]" -IsEditMode $true
-                        $uRole = Read-Input " ▶ 계정 구분/역할 [$($targetAcc.AccountType)]" -IsEditMode $true
+                        $currRole = if ($targetAcc.AccountType -and $targetAcc.AccountType -ne "-") { 
+                            if ($targetAcc.AccountType -eq "일반") { "user" } else { $targetAcc.AccountType }
+                        } else { "user" }
+                        $uRole = Read-Input " ▶ 계정 구분/역할 [$currRole]" -IsEditMode $true
                         $uPW   = Read-MaskedInput -PromptText " ▶ 패스워드 (기존 유지 시 Enter)" -IsEditMode $true
                         $uDesc = Read-Input " ▶ 계정 설명/메모 [$($targetAcc.Description)]" -IsEditMode $true
 
